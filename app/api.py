@@ -8,7 +8,7 @@ from .database import get_db
 from .handlers import router
 
 app = FastAPI(title="Telegram Bot API")
-bot = Bot(token="<YOUR_BOT_TOKEN>")
+bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 dp.include_router(router)
 
