@@ -15,7 +15,7 @@ async def cmd_start(message: types.Message):
 @router.message(Command("stocks"))
 async def cmd_stocks(message: types.Message):
     async with httpx.AsyncClient() as client:
-        response = await client.get("http://data-collector:8000/stocks")
+        response = await client.get("https://stock-market-collector.herokuapp.com/stocks")  # Обновлено
         stocks = response.json()
         if not stocks:
             await message.answer("Нет доступных акций")
@@ -28,7 +28,7 @@ async def cmd_price(message: types.Message):
     try:
         ticker = message.text.split()[1].upper()
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"http://data-collector:8000/stocks/{ticker}")
+            response = await client.get(f"https://stock-market-collector.herokuapp.com/stocks/{ticker}")  # Обновлено
             response.raise_for_status()
             stock = response.json()
             plot = generate_price_plot(ticker)
