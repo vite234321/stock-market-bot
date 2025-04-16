@@ -16,6 +16,7 @@ dp.include_router(router)
 @app.post("/webhook")
 async def webhook(update: dict, db: AsyncSession = Depends(get_db)):
     try:
+        print(f"Получено обновление: {update}")
         telegram_update = Update(**update)
         await dp.feed_update(bot=bot, update=telegram_update, db=db)
         return {"status": "ok"}
@@ -25,6 +26,7 @@ async def webhook(update: dict, db: AsyncSession = Depends(get_db)):
 
 @app.post("/signals")
 async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
+    print(f"Получен сигнал: {signal}")
     ticker = signal["ticker"]
     try:
         result = await db.execute(select(Subscription).where(Subscription.ticker == ticker))
@@ -42,8 +44,10 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
 async def on_startup():
     webhook_url = "https://stock-market-bot.herokuapp.com/webhook"
     await bot.set_webhook(webhook_url)
+    print(f"Webhook установлен: {webhook_url}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook()
     await bot.session.close()
+    print("Webhook удалён")
