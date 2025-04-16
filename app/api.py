@@ -14,10 +14,14 @@ dp = Dispatcher()
 dp.include_router(router)
 
 @app.post("/webhook")
-async def webhook(update: dict):
-    telegram_update = Update(**update)
-    await dp.process_update(telegram_update)
-    return {"status": "ok"}
+async def webhook(update: dict, db: AsyncSession = Depends(get_db)):
+    try:
+        telegram_update = Update(**update)
+        await dp.feed_update(bot=bot, update=telegram_update, db=db)
+        return {"status": "ok"}
+    except Exception as e:
+        print(f"Ошибка при обработке обновления: {e}")
+        return {"status": "error"}
 
 @app.post("/signals")
 async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
@@ -33,3 +37,13 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         print(f"Ошибка при отправке уведомления: {e}")
         return {"status": "error"}
+
+@app.on_event("startup")
+async def on_startup():
+    webhook_url = "https://stock-market-bot.herokuapp.com/webhook"
+    await bot.set_webhook(webhook_url)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot.delete_webhook()
+    await bot.session.close()
