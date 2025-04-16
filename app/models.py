@@ -6,7 +6,7 @@ class Base(AsyncAttrs, DeclarativeBase):
     pass
 
 class Subscription(Base):
-    tablename = "subscriptions"
+    __tablename__ = "subscriptions"  # Добавлено
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, index=True)
     ticker = Column(String, index=True)
