@@ -42,12 +42,11 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
 
 @app.on_event("startup")
 async def on_startup():
-    webhook_url = "https://stock-market-bot.herokuapp.com/webhook"
-    await bot.set_webhook(webhook_url)
-    print(f"Webhook установлен: {webhook_url}")
+    # Временно используем polling вместо webhook
+    await dp.start_polling(bot)
+    print("Бот запущен в режиме polling")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await bot.delete_webhook()
     await bot.session.close()
-    print("Webhook удалён")
+    print("Бот остановлен")
