@@ -10,6 +10,7 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
+    print(f"Получена команда /start от пользователя {message.from_user.id}")
     await message.answer("Добро пожаловать! Используйте команды: /stocks, /price <ticker>, /subscribe <ticker>")
 
 @router.message(Command("stocks"))
