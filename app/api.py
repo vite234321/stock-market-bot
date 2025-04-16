@@ -6,6 +6,7 @@ from sqlalchemy.future import select
 from .models import Subscription
 from .database import get_db
 from .handlers import router
+import os
 
 app = FastAPI(title="Telegram Bot API")
 bot = Bot(token=os.getenv("BOT_TOKEN"))
