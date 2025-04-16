@@ -42,11 +42,19 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
 
 @app.on_event("startup")
 async def on_startup():
-    # Временно используем polling вместо webhook
-    await dp.start_polling(bot)
-    print("Бот запущен в режиме polling")
+    webhook_url = "https://stock-market-bot.herokuapp.com/webhook"
+    try:
+        await bot.delete_webhook()  # Удаляем старый webhook или polling-сессию
+        await bot.set_webhook(webhook_url)
+        print(f"Webhook успешно установлен: {webhook_url}")
+    except Exception as e:
+        print(f"Ошибка при установке webhook: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    try:
+        await bot.delete_webhook()
+        print("Webhook удалён")
+    except Exception as e:
+        print(f"Ошибка при удалении webhook: {e}")
     await bot.session.close()
-    print("Бот остановлен")
