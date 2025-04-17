@@ -97,7 +97,7 @@ async def on_shutdown():
 # Handle SIGTERM for graceful shutdown
 def handle_shutdown(signum, frame):
     logger.info("Received SIGTERM, initiating shutdown")
-    asyncio.create_task(shutdown_bot())
+    asyncio.get_event_loop().create_task(shutdown_bot())
 
 async def shutdown_bot():
     global polling_task
