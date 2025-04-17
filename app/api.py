@@ -6,23 +6,18 @@ from sqlalchemy.future import select
 from .models import Subscription
 from .database import get_db
 from .handlers import router
+from .middlewares import DbSessionMiddleware
 import os
+import asyncio
 
 app = FastAPI(title="Telegram Bot API")
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 dp.include_router(router)
+dp.update.middleware(DbSessionMiddleware())
 
-@app.post("/webhook")
-async def webhook(update: dict, db: AsyncSession = Depends(get_db)):
-    try:
-        print(f"Получено обновление: {update}")
-        telegram_update = Update(**update)
-        await dp.feed_update(bot=bot, update=telegram_update, db=db)
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Ошибка при обработке обновления: {e}")
-        return {"status": "error"}
+# Глобальная переменная для контроля polling
+polling_task = None
 
 @app.post("/signals")
 async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
@@ -42,19 +37,24 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
 
 @app.on_event("startup")
 async def on_startup():
-    webhook_url = "https://stock-market-bot.herokuapp.com/webhook"
+    global polling_task
     try:
-        await bot.delete_webhook()  # Удаляем старый webhook или polling-сессию
-        await bot.set_webhook(webhook_url)
-        print(f"Webhook успешно установлен: {webhook_url}")
+        # Удаляем webhook, если он был установлен
+        await bot.delete_webhook()
+        print("Webhook удалён, начинаем polling")
+        # Запускаем polling в фоновом режиме
+        polling_task = asyncio.create_task(dp.start_polling(bot))
     except Exception as e:
-        print(f"Ошибка при установке webhook: {e}")
+        print(f"Ошибка при запуске polling: {e}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global polling_task
     try:
-        await bot.delete_webhook()
-        print("Webhook удалён")
+        if polling_task:
+            polling_task.cancel()
+            print("Polling остановлен")
+        await bot.session.close()
+        print("Бот остановлен")
     except Exception as e:
-        print(f"Ошибка при удалении webhook: {e}")
-    await bot.session.close()
+        print(f"Ошибка при остановке бота: {e}")
