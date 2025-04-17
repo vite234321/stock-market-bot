@@ -6,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from .models import Subscription
 from .plot import generate_price_plot
-from tenacity import retry, stop_after_attempt, wait_fixed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,16 +18,27 @@ async def cmd_start(message: types.Message):
     logger.info(f"Received /start command from user {message.from_user.id}")
     await message.answer("Добро пожаловать! Используйте команды: /stocks, /price <ticker>, /subscribe <ticker>")
 
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-async def fetch_stocks():
-    async with httpx.AsyncClient() as client:
-        response = await client.get("https://stock-market-collector.herokuapp.com/stocks")
-        response.raise_for_status()
+async def fetch_stocks(max_attempts=3, delay=2):
+    for attempt in range(1, max_attempts + 1):
         try:
-            return response.json()
-        except ValueError as e:
-            logger.error(f"Failed to parse JSON from stocks API: {e}, response: {response.text}")
-            raise
+            async with httpx.AsyncClient() as client:
+                response = await client.get("https://stock-market-collector.herokuapp.com/stocks")
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    logger.error(f"Failed to parse JSON from stocks API: {e}, response: {response.text}")
+                    raise
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Attempt {attempt} failed with HTTP error: {e}")
+            if attempt == max_attempts:
+                raise
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} failed: {e}")
+            if attempt == max_attempts:
+                raise
+        await asyncio.sleep(delay)
+    return None
 
 @router.message(Command("stocks"))
 async def cmd_stocks(message: types.Message):
@@ -46,22 +56,36 @@ async def cmd_stocks(message: types.Message):
         logger.error(f"Unexpected error in cmd_stocks: {e}")
         await message.answer(f"Произошла ошибка: {e}")
 
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
-async def fetch_stock_price(ticker):
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f"https://stock-market-collector.herokuapp.com/stocks/{ticker}")
-        response.raise_for_status()
+async def fetch_stock_price(ticker, max_attempts=3, delay=2):
+    for attempt in range(1, max_attempts + 1):
         try:
-            return response.json()
-        except ValueError as e:
-            logger.error(f"Failed to parse JSON for {ticker}: {e}, response: {response.text}")
-            raise
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"https://stock-market-collector.herokuapp.com/stocks/{ticker}")
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    logger.error(f"Failed to parse JSON for {ticker}: {e}, response: {response.text}")
+                    raise
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Attempt {attempt} failed with HTTP error: {e}")
+            if attempt == max_attempts:
+                raise
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} failed: {e}")
+            if attempt == max_attempts:
+                raise
+        await asyncio.sleep(delay)
+    return None
 
 @router.message(Command("price"))
 async def cmd_price(message: types.Message):
     try:
         ticker = message.text.split()[1].upper()
         stock = await fetch_stock_price(ticker)
+        if not stock:
+            await message.answer(f"Не удалось получить данные для {ticker}")
+            return
         plot = generate_price_plot(ticker)
         if plot:
             await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} RUB")
