@@ -84,6 +84,10 @@ async def on_shutdown():
     try:
         if polling_task:
             polling_task.cancel()
+            try:
+                await polling_task  # Wait for cancellation
+            except asyncio.CancelledError:
+                pass
             logger.info("Polling stopped")
         await bot.session.close()
         logger.info("Bot session closed")
@@ -93,6 +97,23 @@ async def on_shutdown():
 # Handle SIGTERM for graceful shutdown
 def handle_shutdown(signum, frame):
     logger.info("Received SIGTERM, initiating shutdown")
-    sys.exit(0)
+    asyncio.create_task(shutdown_bot())
+
+async def shutdown_bot():
+    global polling_task
+    try:
+        if polling_task:
+            polling_task.cancel()
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Polling stopped during SIGTERM")
+        await bot.session.close()
+        logger.info("Bot session closed during SIGTERM")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Error during SIGTERM shutdown: {e}")
+        sys.exit(1)
 
 signal.signal(signal.SIGTERM, handle_shutdown)
