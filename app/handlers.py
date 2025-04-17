@@ -1,4 +1,5 @@
 import logging
+import asyncio  # Добавлен импорт
 import httpx
 from aiogram import Router, types
 from aiogram.filters import Command, CommandStart
