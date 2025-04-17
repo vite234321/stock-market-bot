@@ -1,10 +1,19 @@
 from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject
+from sqlalchemy.ext.asyncio import AsyncSession
 
 class DbSessionMiddleware(BaseMiddleware):
-    def __init__(self, session_pool):
-        self.session_pool = session_pool
-
-    async def __call__(self, handler, event, data):
-        async with self.session_pool() as session:
-            data["db_session"] = session
-            return await handler(event, data)
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        # Извлекаем db из контекста (передаётся через dp.feed_update)
+        db: AsyncSession = data.get("db")
+        if db:
+            try:
+                result = await handler(event, data)
+                await db.commit()
+                return result
+            except Exception:
+                await db.rollback()
+                raise
+            finally:
+                await db.close()
+        return await handler(event, data)
