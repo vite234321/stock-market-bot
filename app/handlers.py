@@ -1,5 +1,5 @@
 import logging
-import asyncio  # Добавлен импорт
+import asyncio
 import httpx
 from aiogram import Router, types
 from aiogram.filters import Command, CommandStart
@@ -87,7 +87,7 @@ async def cmd_price(message: types.Message):
         if not stock:
             await message.answer(f"Не удалось получить данные для {ticker}")
             return
-        plot = generate_price_plot(ticker)
+        plot = await generate_price_plot(ticker)
         if plot:
             await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} RUB")
         else:
