@@ -7,13 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from .models import Subscription
 from .plot import generate_price_plot
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 router = Router()
-
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
     logger.info(f"Received /start command from user {message.from_user.id}")
@@ -99,7 +95,6 @@ async def cmd_price(message: types.Message):
     except Exception as e:
         logger.error(f"Error in cmd_price for {ticker}: {e}")
         await message.answer(f"Ошибка при получении цены для {ticker}: {e}")
-
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: types.Message, db: AsyncSession):
     try:
