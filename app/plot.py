@@ -3,11 +3,8 @@ import asyncio
 import yfinance as yf
 import matplotlib.pyplot as plt
 from io import BytesIO
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 async def generate_price_plot(ticker: str):
     for attempt in range(1, 4):
         try:
