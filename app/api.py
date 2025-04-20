@@ -13,7 +13,7 @@ from .database import get_db
 from .handlers import router
 from .middlewares import DbSessionMiddleware
 
-# Configure logging
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,10 @@ dp = Dispatcher()
 dp.include_router(router)
 dp.update.middleware(DbSessionMiddleware())
 
-# Global variable to control polling
+# Глобальная переменная для управления polling
 polling_task = None
 
-# Test endpoint for database connectivity
+# Тестовый эндпоинт для проверки подключения к базе данных
 @app.get("/test-db")
 async def test_db(db: AsyncSession = Depends(get_db)):
     try:
@@ -34,12 +34,12 @@ async def test_db(db: AsyncSession = Depends(get_db)):
         subscriptions = result.scalars().all()
         return {"status": "ok", "subscriptions": len(subscriptions)}
     except Exception as e:
-        logger.error(f"Database test failed: {e}")
+        logger.error(f"Ошибка тестирования базы данных: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.post("/signals")
 async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
-    logger.info(f"Received signal: {signal}")
+    logger.info(f"Получен сигнал: {signal}")
     ticker = signal.get("ticker")
     try:
         result = await db.execute(select(Subscription).where(Subscription.ticker == ticker))
@@ -50,32 +50,34 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
             )
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Error sending notification: {e}")
+        logger.error(f"Ошибка отправки уведомления: {e}")
         return {"status": "error"}
 
 @app.on_event("startup")
 async def on_startup():
     global polling_task
     try:
-        # Clear any existing webhook and reset update queue
-        await bot.delete_webhook()
-        await bot.get_updates(offset=-1)
-        logger.info("Webhook deleted, update queue cleared, starting polling")
+        # Очистка вебхуков и очереди обновлений с таймаутом
+        async with bot.session:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Вебхук удален, очередь обновлений очищена")
+        # Запуск polling
+        logger.info("Запуск polling")
         polling_task = asyncio.create_task(dp.start_polling(bot, timeout=20, skip_updates=True))
         
-        # Keep-alive ping every 15 minutes
+        # Keep-alive пинг каждые 15 минут
         async def keep_alive():
             async with httpx.AsyncClient() as client:
                 while True:
                     try:
                         await client.get(f"https://{os.getenv('HEROKU_APP_NAME')}.herokuapp.com/test-db")
-                        logger.info("Keep-alive ping completed")
+                        logger.info("Keep-alive пинг выполнен")
                     except Exception as e:
-                        logger.error(f"Keep-alive ping failed: {e}")
-                    await asyncio.sleep(15 * 60)  # 15 minutes
+                        logger.error(f"Ошибка keep-alive пинга: {e}")
+                    await asyncio.sleep(15 * 60)  # 15 минут
         asyncio.create_task(keep_alive())
     except Exception as e:
-        logger.error(f"Error starting polling: {e}")
+        logger.error(f"Ошибка запуска polling: {e}")
         raise
 
 @app.on_event("shutdown")
@@ -85,18 +87,18 @@ async def on_shutdown():
         if polling_task:
             polling_task.cancel()
             try:
-                await polling_task  # Wait for cancellation
+                await polling_task  # Ожидание отмены
             except asyncio.CancelledError:
                 pass
-            logger.info("Polling stopped")
+            logger.info("Polling остановлен")
         await bot.session.close()
-        logger.info("Bot session closed")
+        logger.info("Сессия бота закрыта")
     except Exception as e:
-        logger.error(f"Error stopping bot: {e}")
+        logger.error(f"Ошибка остановки бота: {e}")
 
-# Handle SIGTERM for graceful shutdown
+# Обработка SIGTERM для корректного завершения
 def handle_shutdown(signum, frame):
-    logger.info("Received SIGTERM, initiating shutdown")
+    logger.info("Получен SIGTERM, инициируется завершение")
     asyncio.get_event_loop().create_task(shutdown_bot())
 
 async def shutdown_bot():
@@ -108,12 +110,12 @@ async def shutdown_bot():
                 await polling_task
             except asyncio.CancelledError:
                 pass
-            logger.info("Polling stopped during SIGTERM")
+            logger.info("Polling остановлен во время SIGTERM")
         await bot.session.close()
-        logger.info("Bot session closed during SIGTERM")
+        logger.info("Сессия бота закрыта во время SIGTERM")
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Error during SIGTERM shutdown: {e}")
+        logger.error(f"Ошибка во время завершения SIGTERM: {e}")
         sys.exit(1)
 
 signal.signal(signal.SIGTERM, handle_shutdown)
