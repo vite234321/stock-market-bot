@@ -57,9 +57,10 @@ async def receive_signal(signal: dict, db: AsyncSession = Depends(get_db)):
 async def on_startup():
     global polling_task
     try:
-        # Очистка вебхуков и очереди обновлений с таймаутом
+        # Очистка вебхуков и очереди обновлений
         async with bot.session:
             await bot.delete_webhook(drop_pending_updates=True)
+            await bot.get_updates(offset=-1)  # Сбрасываем очередь обновлений
             logger.info("Вебхук удален, очередь обновлений очищена")
         # Запуск polling
         logger.info("Запуск polling")
