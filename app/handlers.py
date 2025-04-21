@@ -45,7 +45,7 @@ async def cmd_stocks(message: types.Message):
         if not stocks:
             await message.answer("Нет доступных акций")
             return
-        response_text = "\n".join([f"{s['ticker']}: {s['last_price']} RUB" for s in stocks])
+        response_text = "\n".join([f"{s['ticker']}: {s['last_price']} USD" for s in stocks])  # Изменено на USD
         await message.answer(response_text)
     except httpx.HTTPStatusError:
         await message.answer("Ошибка при получении данных об акциях")
@@ -81,11 +81,11 @@ async def cmd_price(message: types.Message):
             return
         plot = await generate_price_plot(ticker)
         if plot:
-            await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} RUB")
+            await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} USD")
         else:
             await message.answer(f"Не удалось создать график для {ticker}")
     except IndexError:
-        await message.answer("Укажите тикер, например: /price SBER.ME")
+        await message.answer("Укажите тикер, например: /price AAPL")
     except httpx.HTTPStatusError:
         await message.answer(f"Акция {ticker} не найдена")
     except Exception as e:
@@ -118,7 +118,7 @@ async def cmd_subscribe(message: types.Message, db: AsyncSession):
         await db.commit()
         await message.answer(f"Вы подписаны на уведомления по {ticker}")
     except IndexError:
-        await message.answer("Укажите тикер, например: /subscribe SBER.ME")
+        await message.answer("Укажите тикер, например: /subscribe AAPL")
     except Exception as e:
         logger.error(f"Ошибка в cmd_subscribe: {e}")
         await message.answer(f"Ошибка при подписке: {e}")
