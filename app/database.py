@@ -3,17 +3,11 @@ import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from contextlib import asynccontextmanager
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Проверка asyncpg
-try:
-    import asyncpg
-    logger.info(f"asyncpg установлен, версия: {asyncpg.__version__}")
-except ImportError:
-    logger.error("asyncpg не установлен, возможны проблемы с подключением к БД")
 
 # Получаем DATABASE_URL и явно указываем asyncpg
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -28,10 +22,13 @@ elif not DATABASE_URL.startswith("postgresql+asyncpg://"):
 
 logger.info(f"Используется DATABASE_URL: {DATABASE_URL}")
 
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def create_engine():
+    return create_async_engine(DATABASE_URL, echo=True, future=True)
+
 try:
-    engine = create_async_engine(DATABASE_URL, echo=True, future=True)
+    engine = create_engine()
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    logger.info("Движок базы данных успешно создан")
 except Exception as e:
     logger.error(f"Не удалось создать асинхронный движок: {e}")
     raise
@@ -41,11 +38,9 @@ async def get_db():
     async with async_session() as session:
         try:
             yield session
-            logger.debug("Сессия базы данных успешно предоставлена")
         except Exception as e:
             logger.error(f"Ошибка сессии базы данных: {e}")
             await session.rollback()
             raise
         finally:
             await session.close()
-            logger.debug("Сессия базы данных закрыта")
