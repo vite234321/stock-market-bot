@@ -18,7 +18,7 @@ router = Router()
 @router.message(CommandStart())
 async def cmd_start(message: types.Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
-    await message.answer("Добро пожаловать! Используйте команды: /stocks, /price <ticker>, /moex <ticker>, /subscribe <ticker>")
+    await message.answer("Добро пожаловать! Используйте команды: /stocks, /price <ticker>, /moex <ticker>, /subscribe <ticker>, /signals <ticker>")
 
 async def fetch_stocks(max_attempts=3, delay=2):
     for attempt in range(1, max_attempts + 1):
@@ -45,10 +45,10 @@ async def cmd_stocks(message: types.Message):
         if not stocks:
             await message.answer("Нет доступных акций")
             return
-        response_text = "\n".join([f"{s['ticker']}: {s['last_price']} USD" for s in stocks])  # Изменено на USD
+        response_text = "\n".join([f"{s['ticker']}: {s['last_price']} RUB" for s in stocks])
         await message.answer(response_text)
     except httpx.HTTPStatusError:
-        await message.answer("Ошибка при получении данных об акциях")
+        await message.answer("Ещё нет данных об акциях")
     except Exception as e:
         logger.error(f"Ошибка в cmd_stocks: {e}")
         await message.answer(f"Произошла ошибка: {e}")
@@ -81,11 +81,11 @@ async def cmd_price(message: types.Message):
             return
         plot = await generate_price_plot(ticker)
         if plot:
-            await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} USD")
+            await message.answer_photo(plot, caption=f"{ticker}: {stock['last_price']} RUB")
         else:
             await message.answer(f"Не удалось создать график для {ticker}")
     except IndexError:
-        await message.answer("Укажите тикер, например: /price AAPL")
+        await message.answer("Укажите тикер, например: /price SBER.ME")
     except httpx.HTTPStatusError:
         await message.answer(f"Акция {ticker} не найдена")
     except Exception as e:
@@ -118,7 +118,28 @@ async def cmd_subscribe(message: types.Message, db: AsyncSession):
         await db.commit()
         await message.answer(f"Вы подписаны на уведомления по {ticker}")
     except IndexError:
-        await message.answer("Укажите тикер, например: /subscribe AAPL")
+        await message.answer("Укажите тикер, например: /subscribe SBER.ME")
     except Exception as e:
         logger.error(f"Ошибка в cmd_subscribe: {e}")
         await message.answer(f"Ошибка при подписке: {e}")
+
+@router.message(Command("signals"))
+async def cmd_signals(message: types.Message):
+    try:
+        ticker = message.text.split()[1].upper()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"https://stock-market-collector.herokuapp.com/signals?ticker={ticker}")
+            response.raise_for_status()
+            signals = response.json()
+            if not signals:
+                await message.answer(f"Нет сигналов для {ticker}")
+                return
+            response_text = "\n".join([f"{s['signal_type']}: {s['value']} RUB at {s['created_at']}" for s in signals])
+            await message.answer(response_text)
+    except IndexError:
+        await message.answer("Укажите тикер, например: /signals SBER.ME")
+    except httpx.HTTPStatusError:
+        await message.answer(f"Сигналы для {ticker} не найдены")
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_signals: {e}")
+        await message.answer(f"Ошибка: {e}")
