@@ -9,7 +9,7 @@ import yfinance as yf
 from moexalgo import Ticker
 import matplotlib.pyplot as plt
 import io
-from datetime import datetime
+from datetime import datetime, date
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -45,13 +45,20 @@ async def cmd_price(message: Message, session: AsyncSession):
         await message.answer("Укажите тикер, например: /price SBER.ME")
         return
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1mo")
-        if hist.empty:
+        # Попробуем разные форматы тикера
+        ticker_variants = [ticker, ticker.replace('.ME', '')]
+        stock_data = None
+        for t in ticker_variants:
+            stock = yf.Ticker(t)
+            hist = stock.history(period="1mo")
+            if not hist.empty:
+                stock_data = hist
+                break
+        if stock_data is None:
             await message.answer(f"Данные для {ticker} не найдены.")
             return
         plt.figure(figsize=(10, 5))
-        plt.plot(hist.index, hist['Close'], label=f"{ticker} Close Price")
+        plt.plot(stock_data.index, stock_data['Close'], label=f"{ticker} Close Price")
         plt.title(f"{ticker} Price Over Last Month")
         plt.xlabel("Date")
         plt.ylabel("Price")
@@ -75,11 +82,12 @@ async def cmd_moex(message: Message):
         return
     try:
         stock = Ticker(ticker)
-        data = stock.candles(date=datetime.now().strftime("%Y-%m-%d"), period="D")
+        # Используем метод candles без параметра date, запрашиваем последние свечи
+        data = stock.candles(period="D", limit=1)
         if not data:
             await message.answer(f"Данные MOEX для {ticker} не найдены.")
             return
-        last_price = data[-1]["close"]
+        last_price = data.iloc[-1]["close"]
         await message.answer(f"Последняя цена {ticker} на MOEX: {last_price} RUB")
     except Exception as e:
         logger.error(f"Ошибка при получении данных MOEX для {ticker}: {e}")
