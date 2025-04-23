@@ -1,20 +1,27 @@
 import os
-import logging
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Получение DATABASE_URL из переменной окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
-logger.info(f"Используется DATABASE_URL: {DATABASE_URL}")
 
-# Создание асинхронного движка
-engine = create_async_engine(DATABASE_URL, echo=True)
+# Создаём движок с настройкой statement_cache_size=0
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    connect_args={"statement_cache_size": 0}  # Отключаем кэширование prepared statements
+)
 
-# Создание фабрики сессий
-session_pool = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# Асинхронная сессия
+async_session = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False
+)
+
+# Синхронная сессия (для миграций и тестов)
+sync_engine = create_engine(DATABASE_URL.replace("postgresql+asyncpg", "postgresql"))
+SessionLocal = sessionmaker(sync_engine)
 
 def get_session_pool():
-    return session_pool
+    return async_session
