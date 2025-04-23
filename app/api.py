@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import signal
 from fastapi import FastAPI, Depends
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -10,7 +12,6 @@ from app.database import get_session_pool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models import Stock
-import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +30,9 @@ dp = Dispatcher()
 dp.include_router(router)
 dp.message.middleware(DatabaseSessionMiddleware(get_session_pool()))
 
+# Флаг для отслеживания состояния polling
+polling_task = None
+
 async def on_startup():
     logger.info("Запуск бота...")
     # Очистка вебхука
@@ -37,12 +41,24 @@ async def on_startup():
     # Запуск polling в одном процессе
     if os.getenv("HEROKU_APP_NAME"):
         logger.info("Запуск polling на Heroku")
-        await dp.start_polling(bot, polling_timeout=30)
+        global polling_task
+        polling_task = asyncio.create_task(dp.start_polling(bot, polling_timeout=30))
+
+async def on_shutdown():
+    logger.info("Завершение работы бота...")
+    if polling_task:
+        dp.stop_polling()
+        await polling_task
+    await bot.session.close()
+    logger.info("Бот завершил работу")
 
 @app.on_event("startup")
 async def startup_event():
-    # Запускаем polling в отдельной задаче
     asyncio.create_task(on_startup())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await on_shutdown()
 
 @app.get("/test-db")
 async def test_db(session: AsyncSession = Depends(get_session_pool())):

@@ -1,6 +1,6 @@
 from aiogram import Router, Bot
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.models import Stock, Subscription, Signal
@@ -20,7 +20,7 @@ router = Router()
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
-    await message.answer("Добро пожаловать! Используйте команды: /stocks, /price [ticker], /moex [ticker], /subscribe [ticker], /signals [ticker]")
+    await message.answer("Добро пожаловать! Используйте команды:\n/stocks - список всех бумаг\n/price [ticker] - текущая цена и график\n/subscribe [ticker] - подписаться на уведомления")
 
 @router.message(Command("stocks"))
 async def cmd_stocks(message: Message, session: AsyncSession):
@@ -31,34 +31,52 @@ async def cmd_stocks(message: Message, session: AsyncSession):
         if not stocks:
             await message.answer("Акции не найдены.")
             return
-        response = "Доступные акции:\n" + "\n".join([f"{stock.ticker}: {stock.name}" for stock in stocks])
-        await message.answer(response)
+
+        # Создаём кнопки для каждой акции
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for stock in stocks:
+            ticker = stock.ticker
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text=f"{ticker}: {stock.name}", callback_data=f"stock_{ticker}")
+            ])
+        await message.answer("Доступные акции:", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении акций: {e}")
         await message.answer("Произошла ошибка при получении акций.")
 
-@router.message(Command("price"))
-async def cmd_price(message: Message, session: AsyncSession):
-    logger.info(f"Получена команда /price от пользователя {message.from_user.id}")
-    ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
-    if not ticker:
-        await message.answer("Укажите тикер, например: /price SBER.ME")
-        return
+@router.callback_query(lambda c: c.data.startswith("stock_"))
+async def process_stock_selection(callback_query: CallbackQuery, session: AsyncSession):
+    ticker = callback_query.data.split("_")[1]
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} выбрал акцию {ticker}")
+
+    # Кнопки для действий с акцией
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Текущая цена", callback_data=f"price_{ticker}")],
+        [InlineKeyboardButton(text="Подписаться", callback_data=f"subscribe_{ticker}")]
+    ])
+    await callback_query.message.answer(f"Вы выбрали {ticker}. Что хотите сделать?", reply_markup=keyboard)
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith("price_"))
+async def process_price(callback_query: CallbackQuery):
+    ticker = callback_query.data.split("_")[1]
+    user_id = callback_query.from_user.id
+    logger.info(f"Получена команда /price для {ticker} от пользователя {user_id}")
     try:
-        # Попробуем разные форматы тикера
-        ticker_variants = [ticker, ticker.replace('.ME', '')]
-        stock_data = None
-        for t in ticker_variants:
-            stock = yf.Ticker(t)
-            hist = stock.history(period="1mo")
-            if not hist.empty:
-                stock_data = hist
-                break
-        if stock_data is None:
-            await message.answer(f"Данные для {ticker} не найдены.")
+        # Попробуем сначала moexalgo, так как yfinance не работает с .ME
+        stock = Ticker(ticker.replace(".ME", ""))
+        data = stock.candles(period="D", limit=30)
+        if data.empty:
+            await callback_query.message.answer(f"Данные для {ticker} не найдены.")
             return
+
+        # Получаем текущую цену
+        current_price = data.iloc[-1]["close"]
+
+        # Создаём график
         plt.figure(figsize=(10, 5))
-        plt.plot(stock_data.index, stock_data['Close'], label=f"{ticker} Close Price")
+        plt.plot(data.index, data['close'], label=f"{ticker} Close Price")
         plt.title(f"{ticker} Price Over Last Month")
         plt.xlabel("Date")
         plt.ylabel("Price")
@@ -67,11 +85,76 @@ async def cmd_price(message: Message, session: AsyncSession):
         buf = io.BytesIO()
         plt.savefig(buf, format="png")
         buf.seek(0)
-        await message.answer_photo(photo=buf, caption=f"График цен для {ticker} за последний месяц")
+
+        await callback_query.message.answer_photo(
+            photo=buf,
+            caption=f"Текущая цена {ticker}: {current_price} RUB\nГрафик цен за последний месяц"
+        )
         plt.close()
     except Exception as e:
         logger.error(f"Ошибка при получении цены для {ticker}: {e}")
-        await message.answer(f"Ошибка при получении данных для {ticker}.")
+        await callback_query.message.answer(f"Ошибка при получении данных для {ticker}.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data.startswith("subscribe_"))
+async def process_subscribe(callback_query: CallbackQuery, session: AsyncSession):
+    ticker = callback_query.data.split("_")[1]
+    user_id = callback_query.from_user.id
+    logger.info(f"Получена команда /subscribe для {ticker} от пользователя {user_id}")
+    try:
+        stock = await session.execute(select(Stock).where(Stock.ticker == ticker))
+        stock = stock.scalars().first()
+        if not stock:
+            await callback_query.message.answer(f"Акция {ticker} не найдена.")
+            return
+        subscription = await session.execute(
+            select(Subscription).where(
+                Subscription.user_id == user_id,
+                Subscription.ticker == ticker
+            )
+        )
+        if subscription.scalars().first():
+            await callback_query.message.answer(f"Вы уже подписаны на {ticker}.")
+            return
+        new_subscription = Subscription(user_id=user_id, ticker=ticker)
+        session.add(new_subscription)
+        await session.commit()
+        await callback_query.message.answer(f"Вы успешно подписались на {ticker}!")
+    except Exception as e:
+        logger.error(f"Ошибка при подписке на {ticker}: {e}")
+        await callback_query.message.answer(f"Ошибка при подписке на {ticker}.")
+    await callback_query.answer()
+
+# Поддержка текстовых команд для обратной совместимости
+@router.message(Command("price"))
+async def cmd_price(message: Message, session: AsyncSession):
+    ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+    if not ticker:
+        await message.answer("Укажите тикер, например: /price GAZP")
+        return
+    # Перенаправляем на callback для единообразия
+    await process_price(CallbackQuery(
+        id="manual_price",
+        from_user=message.from_user,
+        message=message,
+        chat_instance="manual",
+        data=f"price_{ticker}"
+    ))
+
+@router.message(Command("subscribe"))
+async def cmd_subscribe(message: Message, session: AsyncSession):
+    ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
+    if not ticker:
+        await message.answer("Укажите тикер, например: /subscribe GAZP")
+        return
+    # Перенаправляем на callback для единообразия
+    await process_subscribe(CallbackQuery(
+        id="manual_subscribe",
+        from_user=message.from_user,
+        message=message,
+        chat_instance="manual",
+        data=f"subscribe_{ticker}"
+    ), session)
 
 @router.message(Command("moex"))
 async def cmd_moex(message: Message):
@@ -82,9 +165,8 @@ async def cmd_moex(message: Message):
         return
     try:
         stock = Ticker(ticker)
-        # Используем метод candles без параметра date, запрашиваем последние свечи
         data = stock.candles(period="D", limit=1)
-        if not data:
+        if data.empty:
             await message.answer(f"Данные MOEX для {ticker} не найдены.")
             return
         last_price = data.iloc[-1]["close"]
@@ -92,36 +174,6 @@ async def cmd_moex(message: Message):
     except Exception as e:
         logger.error(f"Ошибка при получении данных MOEX для {ticker}: {e}")
         await message.answer(f"Ошибка при получении данных MOEX для {ticker}.")
-
-@router.message(Command("subscribe"))
-async def cmd_subscribe(message: Message, session: AsyncSession):
-    logger.info(f"Получена команда /subscribe от пользователя {message.from_user.id}")
-    ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
-    if not ticker:
-        await message.answer("Укажите тикер, например: /subscribe SBER.ME")
-        return
-    try:
-        stock = await session.execute(select(Stock).where(Stock.ticker == ticker))
-        stock = stock.scalars().first()
-        if not stock:
-            await message.answer(f"Акция {ticker} не найдена.")
-            return
-        subscription = await session.execute(
-            select(Subscription).where(
-                Subscription.user_id == message.from_user.id,
-                Subscription.ticker == ticker
-            )
-        )
-        if subscription.scalars().first():
-            await message.answer(f"Вы уже подписаны на {ticker}.")
-            return
-        new_subscription = Subscription(user_id=message.from_user.id, ticker=ticker)
-        session.add(new_subscription)
-        await session.commit()
-        await message.answer(f"Вы успешно подписались на {ticker}!")
-    except Exception as e:
-        logger.error(f"Ошибка при подписке на {ticker}: {e}")
-        await message.answer(f"Ошибка при подписке на {ticker}.")
 
 @router.message(Command("signals"))
 async def cmd_signals(message: Message, session: AsyncSession):
