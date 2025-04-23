@@ -6,8 +6,6 @@ import logging
 from app.models import Stock, Subscription, Signal
 from sqlalchemy import select
 from moexalgo import Ticker
-import matplotlib.pyplot as plt
-import io
 from datetime import datetime
 
 # Настройка логирования
@@ -19,7 +17,7 @@ router = Router()
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
-    await message.answer("Добро пожаловать! Используйте команды:\n/stocks - список всех бумаг\n/price [ticker] - текущая цена и график\n/subscribe [ticker] - подписаться на уведомления")
+    await message.answer("Добро пожаловать! Используйте команды:\n/stocks - список всех бумаг\n/price [ticker] - текущая цена\n/subscribe [ticker] - подписаться на уведомления")
 
 @router.message(Command("stocks"))
 async def cmd_stocks(message: Message, session: AsyncSession):
@@ -66,31 +64,13 @@ async def process_price(callback_query: CallbackQuery):
     logger.info(f"Получена команда /price для {ticker} от пользователя {user_id}")
     try:
         stock = Ticker(ticker.replace(".ME", ""))
-        data = stock.candles(period="D", limit=30)
+        data = stock.candles(period="D", limit=1)
         if data.empty:
             await callback_query.message.answer(f"Данные для {ticker} не найдены.")
             return
 
-        # Получаем текущую цену
         current_price = data.iloc[-1]["close"]
-
-        # Создаём график
-        plt.figure(figsize=(5, 2))  # Ещё уменьшаем размер для экономии памяти
-        plt.plot(data.index, data['close'], label=f"{ticker} Close Price")
-        plt.title(f"{ticker} Price")
-        plt.xlabel("Date")
-        plt.ylabel("Price")
-        plt.legend()
-        plt.grid()
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", bbox_inches="tight")
-        buf.seek(0)
-
-        await callback_query.message.answer_photo(
-            photo=buf,
-            caption=f"Текущая цена {ticker}: {current_price} RUB\nГрафик цен за последний месяц"
-        )
-        plt.close()
+        await callback_query.message.answer(f"Текущая цена {ticker}: {current_price} RUB")
     except Exception as e:
         logger.error(f"Ошибка при получении цены для {ticker}: {e}")
         await callback_query.message.answer(f"Ошибка при получении данных для {ticker}.")
@@ -161,7 +141,7 @@ async def cmd_moex(message: Message):
         await message.answer("Укажите тикер, например: /moex SBER")
         return
     try:
-        stock = Ticker(ticker)
+        stock = Ticker(ticker.replace(".ME", ""))
         data = stock.candles(period="D", limit=1)
         if data.empty:
             await message.answer(f"Данные MOEX для {ticker} не найдены.")
