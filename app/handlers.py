@@ -35,14 +35,7 @@ async def cmd_stocks(message: Message, session: AsyncSession):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[])
         for stock in stocks:
             ticker = stock.ticker
-            # Получаем текущую цену через moexalgo
-            try:
-                moex_stock = Ticker(ticker.replace(".ME", ""))
-                data = moex_stock.candles(period="D", limit=1)
-                price = data.iloc[-1]["close"] if not data.empty else "N/A"
-            except Exception as e:
-                logger.error(f"Ошибка получения цены для {ticker}: {e}")
-                price = "N/A"
+            price = stock.last_price if stock.last_price is not None else "N/A"
             button_text = f"{ticker}: {stock.name} ({price} RUB)"
             keyboard.inline_keyboard.append([
                 InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
@@ -82,7 +75,7 @@ async def process_price(callback_query: CallbackQuery):
         current_price = data.iloc[-1]["close"]
 
         # Создаём график
-        plt.figure(figsize=(6, 3))  # Уменьшенный размер для экономии памяти
+        plt.figure(figsize=(6, 3))
         plt.plot(data.index, data['close'], label=f"{ticker} Close Price")
         plt.title(f"{ticker} Price Over Last Month")
         plt.xlabel("Date")
