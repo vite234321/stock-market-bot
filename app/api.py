@@ -1,85 +1,55 @@
 import os
 import logging
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI
 from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.client.bot import DefaultBotProperties
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from app.database import get_session
-from app.handlers import router as handlers_router
-from app.middlewares import DbSessionMiddleware
-from app.models import Subscription
+from app.handlers import router
+from app.middlewares import DatabaseSessionMiddleware
+from app.database import get_session_pool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel
+from app.models import Stock
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация FastAPI
-app = FastAPI(title="Stock Market Bot")
+app = FastAPI()
 
-# Инициализация Telegram-бота
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
-
-session = AiohttpSession()
-bot = Bot(token=BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Инициализация бота
+bot = Bot(
+    token=os.getenv("BOT_TOKEN"),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher()
-dp.include_router(handlers_router)
-dp.message.middleware(DbSessionMiddleware())
 
-# Модель для сигналов
-class Signal(BaseModel):
-    ticker: str
-    signal_type: str
-    value: float
+# Регистрация роутеров и middleware
+dp.include_router(router)
+dp.message.middleware(DatabaseSessionMiddleware(get_session_pool()))
 
-# Запуск polling при старте приложения
-@app.on_event("startup")
 async def on_startup():
     logger.info("Запуск бота...")
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Вебхук удален, очередь обновлений очищена")
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Ошибка при запуске polling: {e}")
-        raise
+    # Очистка вебхука
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Вебхук удален, очередь обновлений очищена")
+    # Запуск polling в одном процессе
+    if os.getenv("HEROKU_APP_NAME"):
+        logger.info("Запуск polling на Heroku")
+        await dp.start_polling(bot, polling_timeout=30)
 
-# Эндпоинт для проверки подключения к базе данных
+@app.on_event("startup")
+async def startup_event():
+    # Запускаем polling в отдельной задаче
+    asyncio.create_task(on_startup())
+
 @app.get("/test-db")
-async def test_db():
+async def test_db(session: AsyncSession = Depends(get_session_pool())):
     try:
-        async with get_session() as session:
-            result = await session.execute(select(Subscription))
-            await session.commit()
-            return {"status": "Database connection successful", "subscriptions_count": len(result.scalars().all())}
+        result = await session.execute(select(Stock))
+        stocks = result.scalars().all()
+        return {"status": "success", "stocks": [stock.ticker for stock in stocks]}
     except Exception as e:
         logger.error(f"Ошибка подключения к базе данных: {e}")
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-
-# Эндпоинт для получения сигналов
-@app.post("/signals")
-async def receive_signal(signal: Signal, session: AsyncSession = Depends(get_session)):
-    try:
-        # Найти подписчиков для тикера
-        subscriptions = await session.execute(
-            select(Subscription).where(Subscription.ticker == signal.ticker)
-        )
-        subscriptions = subscriptions.scalars().all()
-
-        # Отправить уведомления
-        for sub in subscriptions:
-            message = f"📊 Сигнал для {signal.ticker}: {signal.signal_type} (значение: {signal.value})"
-            try:
-                await bot.send_message(chat_id=sub.user_id, text=message)
-            except Exception as e:
-                logger.error(f"Ошибка отправки сообщения пользователю {sub.user_id}: {e}")
-
-        return {"status": "Signal processed", "notified_users": len(subscriptions)}
-    except Exception as e:
-        logger.error(f"Ошибка обработки сигнала: {e}")
-        raise HTTPException(status_code=500, detail=f"Signal processing error: {str(e)}")
+        return {"status": "error", "message": str(e)}
