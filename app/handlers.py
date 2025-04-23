@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
-from app.models import Stock, Subscription
+from app.models import Stock, Subscription, Signal
 from sqlalchemy import select
 import yfinance as yf
 from moexalgo import Ticker
@@ -123,7 +123,6 @@ async def cmd_signals(message: Message, session: AsyncSession):
         await message.answer("Укажите тикер, например: /signals SBER.ME")
         return
     try:
-        from app.models import Signal
         signals = await session.execute(
             select(Signal).where(Signal.ticker == ticker)
         )

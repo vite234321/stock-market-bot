@@ -11,3 +11,4 @@ apscheduler>=3.10.4
 moexalgo>=0.4.1
 alembic>=1.13.2
 tenacity>=8.2.3
+python-dotenv>=1.0.0
