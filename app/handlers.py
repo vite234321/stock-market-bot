@@ -75,9 +75,9 @@ async def process_price(callback_query: CallbackQuery):
         current_price = data.iloc[-1]["close"]
 
         # Создаём график
-        plt.figure(figsize=(6, 3))
+        plt.figure(figsize=(5, 2))  # Ещё уменьшаем размер для экономии памяти
         plt.plot(data.index, data['close'], label=f"{ticker} Close Price")
-        plt.title(f"{ticker} Price Over Last Month")
+        plt.title(f"{ticker} Price")
         plt.xlabel("Date")
         plt.ylabel("Price")
         plt.legend()
