@@ -5,11 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.models import Stock, Subscription, Signal
 from sqlalchemy import select
-import yfinance as yf
 from moexalgo import Ticker
 import matplotlib.pyplot as plt
 import io
-from datetime import datetime, date
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -36,8 +35,17 @@ async def cmd_stocks(message: Message, session: AsyncSession):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[])
         for stock in stocks:
             ticker = stock.ticker
+            # Получаем текущую цену через moexalgo
+            try:
+                moex_stock = Ticker(ticker.replace(".ME", ""))
+                data = moex_stock.candles(period="D", limit=1)
+                price = data.iloc[-1]["close"] if not data.empty else "N/A"
+            except Exception as e:
+                logger.error(f"Ошибка получения цены для {ticker}: {e}")
+                price = "N/A"
+            button_text = f"{ticker}: {stock.name} ({price} RUB)"
             keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text=f"{ticker}: {stock.name}", callback_data=f"stock_{ticker}")
+                InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
             ])
         await message.answer("Доступные акции:", reply_markup=keyboard)
     except Exception as e:
@@ -64,7 +72,6 @@ async def process_price(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     logger.info(f"Получена команда /price для {ticker} от пользователя {user_id}")
     try:
-        # Попробуем сначала moexalgo, так как yfinance не работает с .ME
         stock = Ticker(ticker.replace(".ME", ""))
         data = stock.candles(period="D", limit=30)
         if data.empty:
@@ -75,7 +82,7 @@ async def process_price(callback_query: CallbackQuery):
         current_price = data.iloc[-1]["close"]
 
         # Создаём график
-        plt.figure(figsize=(10, 5))
+        plt.figure(figsize=(6, 3))  # Уменьшенный размер для экономии памяти
         plt.plot(data.index, data['close'], label=f"{ticker} Close Price")
         plt.title(f"{ticker} Price Over Last Month")
         plt.xlabel("Date")
@@ -83,7 +90,7 @@ async def process_price(callback_query: CallbackQuery):
         plt.legend()
         plt.grid()
         buf = io.BytesIO()
-        plt.savefig(buf, format="png")
+        plt.savefig(buf, format="png", bbox_inches="tight")
         buf.seek(0)
 
         await callback_query.message.answer_photo(
@@ -125,14 +132,12 @@ async def process_subscribe(callback_query: CallbackQuery, session: AsyncSession
         await callback_query.message.answer(f"Ошибка при подписке на {ticker}.")
     await callback_query.answer()
 
-# Поддержка текстовых команд для обратной совместимости
 @router.message(Command("price"))
 async def cmd_price(message: Message, session: AsyncSession):
     ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
     if not ticker:
         await message.answer("Укажите тикер, например: /price GAZP")
         return
-    # Перенаправляем на callback для единообразия
     await process_price(CallbackQuery(
         id="manual_price",
         from_user=message.from_user,
@@ -147,7 +152,6 @@ async def cmd_subscribe(message: Message, session: AsyncSession):
     if not ticker:
         await message.answer("Укажите тикер, например: /subscribe GAZP")
         return
-    # Перенаправляем на callback для единообразия
     await process_subscribe(CallbackQuery(
         id="manual_subscribe",
         from_user=message.from_user,
