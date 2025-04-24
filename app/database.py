@@ -4,7 +4,12 @@ import os
 
 DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql+asyncpg://")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+# Отключаем кэширование подготовленных запросов для asyncpg
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    connect_args={"statement_cache_size": 0}  # Отключаем кэш prepared statements
+)
 
 # Создаём фабрику сессий
 async_session = async_sessionmaker(
