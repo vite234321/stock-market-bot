@@ -1,5 +1,5 @@
 from aiogram import Router, Bot
-from aiogram.filters import Command, Text
+from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -256,7 +256,7 @@ async def all_stocks(callback_query: CallbackQuery, session: AsyncSession):
         await callback_query.message.answer("Ошибка при загрузке списка акций.")
     await callback_query.answer()
 
-@router.message(Text(startswith=["SBER", "GAZP", "LKOH", "YNDX", "ROSN", "TATN", "VTBR", "MGNT", "NVTK", "GMKN"]))
+@router.message(lambda message: message.text and any(message.text.upper().startswith(ticker) for ticker in ["SBER", "GAZP", "LKOH", "YNDX", "ROSN", "TATN", "VTBR", "MGNT", "NVTK", "GMKN"]) or len(message.text.split()) == 1)
 async def search_stock(message: Message, session: AsyncSession):
     query = message.text.strip().upper()
     logger.info(f"Пользователь {message.from_user.id} выполнил поиск: {query}")
