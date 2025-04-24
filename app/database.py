@@ -1,15 +1,22 @@
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 import os
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 DATABASE_URL = os.getenv("DATABASE_URL").replace("postgres://", "postgresql+asyncpg://")
 
 # Отключаем кэширование подготовленных запросов для asyncpg
+logger.info("Создание движка SQLAlchemy с отключением кэша prepared statements...")
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
     connect_args={"statement_cache_size": 0}  # Отключаем кэш prepared statements
 )
+logger.info("Движок SQLAlchemy создан успешно.")
 
 # Создаём фабрику сессий
 async_session = async_sessionmaker(
