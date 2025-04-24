@@ -10,6 +10,26 @@ class DbSessionMiddleware(BaseMiddleware):
         event: Any,
         data: Dict[str, Any],
     ) -> Any:
-        async with get_db() as session:
+        # Получаем генератор сессии
+        session_gen = get_db()
+        # Извлекаем сессию из генератора
+        session = await anext(session_gen)
+        try:
+            # Передаём сессию в обработчик через data
             data["session"] = session
-            return await handler(event, data)
+            result = await handler(event, data)
+            # Подтверждаем транзакцию, если всё прошло успешно
+            await session.commit()
+            return result
+        except Exception as e:
+            # Откатываем транзакцию в случае ошибки
+            await session.rollback()
+            raise e
+        finally:
+            # Закрываем сессию
+            await session.close()
+            # Закрываем генератор
+            try:
+                await anext(session_gen)
+            except StopAsyncIteration:
+                pass
