@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.models import Stock, Subscription, Signal
 from sqlalchemy import select
-from moexalgo import Market, Ticker
 from datetime import datetime
 
 # Настройка логирования
@@ -17,11 +16,12 @@ router = Router()
 # Главное меню
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Список акций", callback_data="list_stocks")],
+        [InlineKeyboardButton(text="📈 Все акции", callback_data="all_stocks_1")],
+        [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks")],
         [InlineKeyboardButton(text="🔍 Цена акции", callback_data="check_price")],
-        [InlineKeyboardButton(text="🔔 Подписаться на акции", callback_data="subscribe")],
-        [InlineKeyboardButton(text="📊 Мои сигналы", callback_data="signals")],
-        [InlineKeyboardButton(text="🔎 Поиск акции", callback_data="search_stock")]
+        [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe")],
+        [InlineKeyboardButton(text="📊 Сигналы", callback_data="signals")],
+        [InlineKeyboardButton(text="🔎 Поиск", callback_data="search_stock")]
     ])
     return keyboard
 
@@ -29,22 +29,23 @@ def get_main_menu():
 async def cmd_start(message: Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
     welcome_text = (
-        "🌟 <b>Добро пожаловать в StockBot!</b> 🌟\n\n"
-        "Я помогу вам следить за акциями на MOEX! 🚀\n"
-        "Вы можете:\n"
-        "📈 Посмотреть список доступных акций\n"
-        "🔍 Узнать текущую цену акции\n"
-        "🔔 Подписаться на уведомления о росте\n"
-        "📊 Проверить сигналы по акциям\n"
-        "🔎 Найти акцию по тикеру или имени\n\n"
-        "Выберите действие в меню ниже 👇"
+        "🌟 <b>StockBot — Ваш помощник на MOEX!</b> 🌟\n\n"
+        "Я помогу следить за всеми акциями в реальном времени! 🚀\n"
+        "Что я умею:\n"
+        "📈 Показать все акции с ценами\n"
+        "📋 Показать ваши подписки\n"
+        "🔍 Узнать цену акции\n"
+        "🔔 Подписаться на уведомления\n"
+        "📊 Показать сигналы роста\n"
+        "🔎 Найти акцию по имени\n\n"
+        "Выберите действие в меню 👇"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu())
 
 @router.callback_query(lambda c: c.data == "list_stocks")
 async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
-    logger.info(f"Пользователь {user_id} запросил список акций")
+    logger.info(f"Пользователь {user_id} запросил список своих акций")
     try:
         result = await session.execute(select(Stock))
         stocks = result.scalars().all()
@@ -61,8 +62,8 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             keyboard.inline_keyboard.append([
                 InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
             ])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_menu")])
-        await callback_query.message.answer("📈 <b>Доступные акции:</b>", parse_mode="HTML", reply_markup=keyboard)
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
+        await callback_query.message.answer("📋 <b>Ваши акции:</b>", parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении акций: {e}")
         await callback_query.message.answer("Произошла ошибка при получении акций.")
@@ -105,31 +106,30 @@ async def process_stock_selection(callback_query: CallbackQuery, session: AsyncS
     logger.info(f"Пользователь {user_id} выбрал акцию {ticker}")
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Текущая цена", callback_data=f"price_{ticker}")],
+        [InlineKeyboardButton(text="🔍 Цена", callback_data=f"price_{ticker}")],
         [InlineKeyboardButton(text="🔔 Подписаться", callback_data=f"subscribe_{ticker}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="list_stocks")]
     ])
-    await callback_query.message.answer(f"📊 Вы выбрали <b>{ticker}</b>. Что хотите сделать?", parse_mode="HTML", reply_markup=keyboard)
+    await callback_query.message.answer(f"📊 Вы выбрали <b>{ticker}</b>. Что сделать?", parse_mode="HTML", reply_markup=keyboard)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data.startswith("price_"))
-async def process_price(callback_query: CallbackQuery):
+async def process_price(callback_query: CallbackQuery, session: AsyncSession):
     ticker = callback_query.data.split("_")[1]
     user_id = callback_query.from_user.id
     logger.info(f"Получена команда /price для {ticker} от пользователя {user_id}")
     try:
-        stock = Ticker(ticker.replace(".ME", ""))
-        data = stock.candles(period="D", limit=1)
-        if data.empty:
-            await callback_query.message.answer(f"Данные для {ticker} не найдены.")
+        result = await session.execute(select(Stock).where(Stock.ticker == ticker))
+        stock = result.scalars().first()
+        if not stock:
+            await callback_query.message.answer(f"Акция {ticker} не найдена в базе.")
             return
 
-        current_price = data.iloc[-1]["close"]
-        volume = data.iloc[-1]["volume"]
         await callback_query.message.answer(
-            f"💰 <b>{ticker}</b>\n"
-            f"📈 Цена: {current_price} RUB\n"
-            f"📊 Объём: {volume} акций",
+            f"💰 <b>{stock.ticker}</b> ({stock.name})\n"
+            f"📈 Цена: {stock.last_price} RUB\n"
+            f"📊 Объём: {stock.volume} акций\n"
+            f"🕒 Обновлено: {stock.updated_at}",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -167,7 +167,7 @@ async def process_subscribe(callback_query: CallbackQuery, session: AsyncSession
     await callback_query.answer()
 
 @router.message(Command("price"))
-async def cmd_price(message: Message):
+async def cmd_price(message: Message, session: AsyncSession):
     ticker = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
     if not ticker:
         await message.answer("🔍 Введите тикер акции (например, SBER.ME):")
@@ -178,7 +178,7 @@ async def cmd_price(message: Message):
         message=message,
         chat_instance="manual",
         data=f"price_{ticker}"
-    ))
+    ), session)
 
 @router.message(Command("subscribe"))
 async def cmd_subscribe(message: Message, session: AsyncSession):
@@ -214,31 +214,32 @@ async def cmd_signals(message: Message, session: AsyncSession):
         logger.error(f"Ошибка при получении сигналов для {ticker}: {e}")
         await message.answer(f"Ошибка при получении сигналов для {ticker}.")
 
-@router.message(Command("all_stocks"))
-async def cmd_all_stocks(message: Message, page: int = 1):
-    logger.info(f"Получена команда /all_stocks от пользователя {message.from_user.id}, страница {page}")
+@router.callback_query(lambda c: c.data.startswith("all_stocks_"))
+async def all_stocks(callback_query: CallbackQuery, session: AsyncSession):
+    page = int(callback_query.data.split("_")[2])
+    logger.info(f"Пользователь {callback_query.from_user.id} запросил все акции, страница {page}")
     try:
-        market = Market("stocks")
-        stocks = market.tickers()
+        # Получаем акции из базы с пагинацией
+        page_size = 20
+        offset = (page - 1) * page_size
+        result = await session.execute(
+            select(Stock).offset(offset).limit(page_size)
+        )
+        stocks = result.scalars().all()
+
+        total_stocks_result = await session.execute(select(Stock))
+        total_stocks = len(total_stocks_result.scalars().all())
+        total_pages = (total_stocks + page_size - 1) // page_size
+
         if not stocks:
-            await message.answer("Не удалось загрузить список акций с MOEX.")
+            await callback_query.message.answer("Акции не найдены.")
             return
 
-        # Пагинация: по 20 акций на страницу
-        page_size = 20
-        total_stocks = len(stocks)
-        total_pages = (total_stocks + page_size - 1) // page_size
-        start = (page - 1) * page_size
-        end = min(start + page_size, total_stocks)
-        stocks_page = stocks[start:end]
+        response = f"📈 <b>Все акции (Страница {page}/{total_pages})</b>:\n\n"
+        for stock in stocks:
+            price = stock.last_price if stock.last_price is not None else "N/A"
+            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
 
-        response = f"📜 <b>Список всех акций на MOEX (Страница {page}/{total_pages})</b>:\n\n"
-        for stock in stocks_page:
-            ticker = stock['ticker']
-            name = stock.get('shortname', ticker)
-            response += f"🔹 {ticker}: {name}\n"
-
-        # Кнопки пагинации
         keyboard = InlineKeyboardMarkup(inline_keyboard=[])
         buttons = []
         if page > 1:
@@ -249,44 +250,32 @@ async def cmd_all_stocks(message: Message, page: int = 1):
             keyboard.inline_keyboard.append(buttons)
         keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
 
-        response += "\nДля проверки цены используйте /price [ticker] или выберите акцию в меню 📈"
-        await message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении списка всех акций: {e}")
-        await message.answer("Ошибка при загрузке списка акций.")
-
-@router.callback_query(lambda c: c.data.startswith("all_stocks_"))
-async def paginate_all_stocks(callback_query: CallbackQuery):
-    page = int(callback_query.data.split("_")[2])
-    await cmd_all_stocks(callback_query.message, page=page)
+        await callback_query.message.answer("Ошибка при загрузке списка акций.")
     await callback_query.answer()
 
 @router.message(Text(startswith=["SBER", "GAZP", "LKOH", "YNDX", "ROSN", "TATN", "VTBR", "MGNT", "NVTK", "GMKN"]))
-async def search_stock(message: Message):
+async def search_stock(message: Message, session: AsyncSession):
     query = message.text.strip().upper()
     logger.info(f"Пользователь {message.from_user.id} выполнил поиск: {query}")
     try:
-        market = Market("stocks")
-        stocks = market.tickers()
+        result = await session.execute(
+            select(Stock).where(
+                (Stock.ticker.ilike(f"%{query}%")) | (Stock.name.ilike(f"%{query}%"))
+            )
+        )
+        stocks = result.scalars().all()
+
         if not stocks:
-            await message.answer("Не удалось загрузить список акций с MOEX.")
-            return
-
-        # Поиск по тикеру или имени
-        results = [
-            stock for stock in stocks
-            if query in stock['ticker'].upper() or query in stock.get('shortname', '').upper()
-        ]
-
-        if not results:
             await message.answer(f"Акции по запросу '{query}' не найдены.")
             return
 
         response = f"🔎 <b>Результаты поиска для '{query}'</b>:\n\n"
-        for stock in results[:10]:  # Ограничим до 10 результатов
-            ticker = stock['ticker']
-            name = stock.get('shortname', ticker)
-            response += f"🔹 {ticker}: {name}\n"
+        for stock in stocks[:10]:  # Ограничим до 10 результатов
+            price = stock.last_price if stock.last_price is not None else "N/A"
+            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
