@@ -6,6 +6,7 @@ from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 import logging
 import os
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +37,7 @@ async def on_startup():
     logger.info("Вебхук удален, очередь обновлений очищена")
     logger.info("Запуск polling на Heroku")
     # Запускаем polling в фоновом режиме
-    dp.start_polling(bot)
+    asyncio.create_task(dp.start_polling(bot))
 
 @app.on_event("shutdown")
 async def on_shutdown():
