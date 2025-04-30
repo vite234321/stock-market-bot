@@ -1,10 +1,9 @@
 # app/api.py
 from fastapi import FastAPI
-from aiogram import Bot
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram import Bot, types
-import aiogram  # Добавляем импорт для проверки версии
+import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 from app.database import init_db, async_session
@@ -25,15 +24,20 @@ app = FastAPI()
 # Выводим версию aiogram в логи
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
-# Выводим содержимое handlers.py для отладки
-with open("app/handlers.py", "r", encoding="utf-8") as f:
-    logger.info(f"Содержимое handlers.py на Heroku:\n{f.read()}")
-
 # Инициализация бота
 bot = Bot(
     token=os.getenv("BOT_TOKEN"),
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
+
+# Инициализация диспетчера
+dp = Dispatcher()
+
+# Регистрируем router в диспетчере
+dp.include_router(router)
+
+# Регистрируем middleware через диспетчер
+dp.update.middleware(DbSessionMiddleware())
 
 # Инициализация торгового бота
 trading_bot = TradingBot()
@@ -41,14 +45,10 @@ trading_bot = TradingBot()
 # Инициализация планировщика
 scheduler = AsyncIOScheduler()
 
-# Регистрация middleware
-router.middleware(DbSessionMiddleware())
-
 async def run_autotrading():
     logger.info("Запуск автоторговли для всех пользователей")
     async with async_session() as session:
         try:
-            # Используем ORM вместо сырого SQL-запроса
             result = await session.execute(
                 select(User.user_id).where(
                     (User.tinkoff_token != None) & (User.autotrading_enabled == True)
@@ -57,17 +57,12 @@ async def run_autotrading():
             user_ids = [row[0] for row in result.fetchall()]
             for user_id in user_ids:
                 await trading_bot.analyze_and_trade(session, user_id)
-                # Уведомляем пользователя о запуске торговли
                 try:
                     await bot.send_message(user_id, "🤖 Запущена автоторговля для ваших акций!")
                 except Exception as e:
                     logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
         except Exception as e:
             logger.error(f"Ошибка при запуске автоторговли: {e}")
-
-async def process_update(update: dict):
-    update_obj = types.Update(**update)
-    await router.feed_update(bot=bot, update=update_obj)
 
 @app.on_event("startup")
 async def on_startup():
@@ -81,10 +76,10 @@ async def on_startup():
         logger.warning("Продолжаем работу без базы данных. Некоторые функции могут быть недоступны.")
     # Удаляем вебхук и начинаем polling
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук удален, очередь обновлений очищена")
+    logger.info("Вебхук удалён, очередь обновлений очищена")
     logger.info("Запуск polling на Heroku")
-    # Запускаем polling в фоновом режиме
-    asyncio.create_task(bot.polling())
+    # Запускаем polling через диспетчер
+    asyncio.create_task(dp.start_polling(bot))
     # Запускаем автоторговлю каждые 5 минут
     scheduler.add_job(run_autotrading, "interval", minutes=5)
     scheduler.start()
