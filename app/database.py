@@ -21,12 +21,22 @@ elif DATABASE_URL.startswith("postgresql://"):
 
 logger.info("Строка подключения к базе данных: %s", DATABASE_URL)
 
-# Отключаем кэширование подготовленных запросов для asyncpg
+# Создаём движок SQLAlchemy с использованием пула подключений asyncpg
 logger.info("Создание движка SQLAlchemy с отключением кэша prepared statements...")
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    connect_args={"statement_cache_size": 0}  # Отключаем кэш prepared statements
+    connect_args={
+        "statement_cache_size": 0,  # Отключаем кэш prepared statements
+        "prepared_statement_cache_size": 0,  # Дополнительно отключаем кэш на уровне asyncpg
+        "server_settings": {
+            "application_name": "stock-market-bott"
+        }
+    },
+    pool_size=5,  # Максимальное количество подключений в пуле
+    max_overflow=10,  # Максимальное количество дополнительных подключений
+    pool_timeout=30,  # Таймаут ожидания подключения
+    pool_pre_ping=True  # Проверка подключения перед использованием
 )
 logger.info("Движок SQLAlchemy создан успешно.")
 
