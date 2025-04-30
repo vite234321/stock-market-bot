@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Float
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -49,11 +49,3 @@ class TradeHistory(Base):
     quantity = Column(Integer, nullable=False)
     total = Column(Float, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class UserBalance(Base):
-    __tablename__ = "user_balance"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, unique=True, index=True, nullable=False)
-    balance = Column(Float, default=100000.0, nullable=False)  # Начальный баланс 100,000 RUB
-    updated_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -4,9 +4,10 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
-from app.models import Stock, Subscription, Signal, User, TradeHistory, UserBalance
+from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
+from tinkoff.invest import AsyncClient
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -278,23 +279,32 @@ async def balance(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил баланс")
     try:
-        result = await session.execute(
-            select(UserBalance).where(UserBalance.user_id == user_id)
+        # Получаем токен пользователя
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id)
         )
-        user_balance = result.scalars().first()
+        user = user_result.scalars().first()
+        if not user or not user.tinkoff_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его через меню.")
+            return
 
-        if not user_balance:
-            user_balance = UserBalance(user_id=user_id, balance=100000.0)
-            session.add(user_balance)
-            await session.commit()
+        async with AsyncClient(user.tinkoff_token) as client:
+            accounts = await client.users.get_accounts()
+            if not accounts.accounts:
+                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
+                return
+            account_id = accounts.accounts[0].id
 
-        response = f"💰 <b>Ваш баланс:</b> {user_balance.balance:.2f} RUB\n"
-        response += f"🕒 Обновлено: {user_balance.updated_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
-        ])
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+            portfolio = await client.operations.get_portfolio(account_id=account_id)
+            total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
+
+            response = f"💰 <b>Ваш баланс:</b> {total_balance:.2f} RUB\n"
+            response += f"🕒 Обновлено: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+            ])
+            await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении баланса: {e}")
         await callback_query.message.answer("❌ Ошибка при получении баланса.")
