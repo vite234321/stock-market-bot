@@ -1,9 +1,10 @@
+# app/handlers.py
 from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
-from app.models import Stock, Subscription, Signal
+from app.models import Stock, Subscription, Signal, User
 from sqlalchemy import select
 from datetime import datetime
 
@@ -16,12 +17,11 @@ router = Router()
 # Главное меню
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📈 Все акции", callback_data="all_stocks_1")],
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks")],
         [InlineKeyboardButton(text="🔍 Цена акции", callback_data="check_price")],
         [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe")],
         [InlineKeyboardButton(text="📊 Сигналы", callback_data="signals")],
-        [InlineKeyboardButton(text="🔎 Поиск", callback_data="search_stock")]
+        [InlineKeyboardButton(text="🔑 Установить токен", callback_data="set_token")],
     ])
     return keyboard
 
@@ -30,14 +30,13 @@ async def cmd_start(message: Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
     welcome_text = (
         "🌟 <b>StockBot — Ваш помощник на MOEX!</b> 🌟\n\n"
-        "Я помогу следить за всеми акциями в реальном времени! 🚀\n"
+        "Я помогу следить за акциями и торговать! 🚀\n"
         "Что я умею:\n"
-        "📈 Показать все акции с ценами\n"
         "📋 Показать ваши подписки\n"
         "🔍 Узнать цену акции\n"
         "🔔 Подписаться на уведомления\n"
         "📊 Показать сигналы роста\n"
-        "🔎 Найти акцию по имени\n\n"
+        "🔑 Установить токен для автоторговли\n\n"
         "Выберите действие в меню 👇"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu())
@@ -47,7 +46,20 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список своих акций")
     try:
-        result = await session.execute(select(Stock))
+        # Получаем тикеры, на которые подписан пользователь
+        result = await session.execute(
+            select(Subscription.ticker).where(Subscription.user_id == user_id)
+        )
+        subscribed_tickers = result.scalars().all()
+
+        if not subscribed_tickers:
+            await callback_query.message.answer("Вы не подписаны ни на одну акцию. Нажмите 'Подписаться', чтобы добавить акции.")
+            return
+
+        # Получаем акции, на которые подписан пользователь
+        result = await session.execute(
+            select(Stock).where(Stock.ticker.in_(subscribed_tickers))
+        )
         stocks = result.scalars().all()
 
         if not stocks:
@@ -87,11 +99,36 @@ async def prompt_signals(callback_query: CallbackQuery):
     await callback_query.message.answer("📊 Введите тикер акции для проверки сигналов (например, SBER.ME):")
     await callback_query.answer()
 
-@router.callback_query(lambda c: c.data == "search_stock")
-async def prompt_search_stock(callback_query: CallbackQuery):
-    logger.info(f"Пользователь {callback_query.from_user.id} хочет найти акцию")
-    await callback_query.message.answer("🔎 Введите тикер или название акции (например, SBER или Сбербанк):")
+@router.callback_query(lambda c: c.data == "set_token")
+async def prompt_set_token(callback_query: CallbackQuery):
+    logger.info(f"Пользователь {callback_query.from_user.id} хочет установить токен")
+    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API:")
     await callback_query.answer()
+
+@router.message(lambda message: message.text and message.text.startswith("t-"))
+async def save_token(message: Message, session: AsyncSession):
+    user_id = message.from_user.id
+    token = message.text.strip()
+    logger.info(f"Пользователь {user_id} ввёл токен T-Invest API")
+
+    try:
+        # Проверяем, есть ли пользователь в базе
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalars().first()
+
+        if user:
+            # Обновляем токен
+            user.tinkoff_token = token
+        else:
+            # Создаём нового пользователя
+            new_user = User(user_id=user_id, tinkoff_token=token)
+            session.add(new_user)
+
+        await session.commit()
+        await message.answer("✅ Токен успешно сохранён! Теперь я могу торговать за вас.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении токена для пользователя {user_id}: {e}")
+        await message.answer("❌ Ошибка при сохранении токена. Попробуйте снова.")
 
 @router.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback_query: CallbackQuery):
@@ -213,74 +250,3 @@ async def cmd_signals(message: Message, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при получении сигналов для {ticker}: {e}")
         await message.answer(f"Ошибка при получении сигналов для {ticker}.")
-
-@router.callback_query(lambda c: c.data.startswith("all_stocks_"))
-async def all_stocks(callback_query: CallbackQuery, session: AsyncSession):
-    page = int(callback_query.data.split("_")[2])
-    logger.info(f"Пользователь {callback_query.from_user.id} запросил все акции, страница {page}")
-    try:
-        # Получаем акции из базы с пагинацией
-        page_size = 20
-        offset = (page - 1) * page_size
-        result = await session.execute(
-            select(Stock).offset(offset).limit(page_size)
-        )
-        stocks = result.scalars().all()
-
-        total_stocks_result = await session.execute(select(Stock))
-        total_stocks = len(total_stocks_result.scalars().all())
-        total_pages = (total_stocks + page_size - 1) // page_size
-
-        if not stocks:
-            await callback_query.message.answer("Акции не найдены.")
-            return
-
-        response = f"📈 <b>Все акции (Страница {page}/{total_pages})</b>:\n\n"
-        for stock in stocks:
-            price = stock.last_price if stock.last_price is not None else "N/A"
-            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-        buttons = []
-        if page > 1:
-            buttons.append(InlineKeyboardButton(text="⬅️ Пред.", callback_data=f"all_stocks_{page-1}"))
-        if page < total_pages:
-            buttons.append(InlineKeyboardButton(text="След. ➡️", callback_data=f"all_stocks_{page+1}"))
-        if buttons:
-            keyboard.inline_keyboard.append(buttons)
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
-
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Ошибка при получении списка всех акций: {e}")
-        await callback_query.message.answer("Ошибка при загрузке списка акций.")
-    await callback_query.answer()
-
-@router.message(lambda message: message.text and any(message.text.upper().startswith(ticker) for ticker in ["SBER", "GAZP", "LKOH", "YNDX", "ROSN", "TATN", "VTBR", "MGNT", "NVTK", "GMKN"]) or len(message.text.split()) == 1)
-async def search_stock(message: Message, session: AsyncSession):
-    query = message.text.strip().upper()
-    logger.info(f"Пользователь {message.from_user.id} выполнил поиск: {query}")
-    try:
-        result = await session.execute(
-            select(Stock).where(
-                (Stock.ticker.ilike(f"%{query}%")) | (Stock.name.ilike(f"%{query}%"))
-            )
-        )
-        stocks = result.scalars().all()
-
-        if not stocks:
-            await message.answer(f"Акции по запросу '{query}' не найдены.")
-            return
-
-        response = f"🔎 <b>Результаты поиска для '{query}'</b>:\n\n"
-        for stock in stocks[:10]:  # Ограничим до 10 результатов
-            price = stock.last_price if stock.last_price is not None else "N/A"
-            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
-        ])
-        await message.answer(response, parse_mode="HTML", reply_markup=keyboard)
-    except Exception as e:
-        logger.error(f"Ошибка при поиске акций: {e}")
-        await message.answer("Ошибка при поиске акций.")

@@ -1,6 +1,15 @@
+# app/models.py
 from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime
 from app.database import Base
 from datetime import datetime
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(BigInteger, unique=True, index=True)  # Telegram user_id
+    tinkoff_token = Column(String, nullable=True)  # Токен T-Invest API
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Stock(Base):
     __tablename__ = "stocks"
@@ -18,7 +27,7 @@ class Subscription(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, index=True)
     ticker = Column(String, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)  # Добавляем столбец
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Signal(Base):
     __tablename__ = "signals"
