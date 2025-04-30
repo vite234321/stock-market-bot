@@ -8,8 +8,10 @@ from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
 from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
+from tinkoff.invest.exceptions import TinkoffInvestError
 import matplotlib.pyplot as plt
 import os
+import asyncio
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -190,6 +192,25 @@ async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession):
         await session.commit()
         logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
         return stock.figi
+    except TinkoffInvestError as e:
+        if "RESOURCE_EXHAUSTED" in str(e):
+            reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+            logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
+            await asyncio.sleep(reset_time)
+            # Повторяем запрос после ожидания
+            response = await client.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code="TQBR",
+                id=stock.ticker
+            )
+            stock.figi = response.instrument.figi
+            session.add(stock)
+            await session.commit()
+            logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
+            return stock.figi
+        else:
+            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+            return None
     except Exception as e:
         logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
         return None

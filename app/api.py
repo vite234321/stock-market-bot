@@ -12,6 +12,7 @@ from app.models import User, Stock
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tinkoff.invest import AsyncClient, InstrumentIdType
+from tinkoff.invest.exceptions import TinkoffInvestError
 import logging
 import os
 import asyncio
@@ -92,19 +93,44 @@ async def update_figi_for_all_stocks():
                     logger.info("Все акции уже имеют FIGI")
                     return
 
-                for stock in stocks:
-                    try:
-                        response = await client.instruments.share_by(
-                            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                            class_code="TQBR",
-                            id=stock.ticker
-                        )
-                        stock.figi = response.instrument.figi
-                        session.add(stock)
-                        logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
-                    except Exception as e:
-                        logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                        continue
+                # Обрабатываем акции пакетами по 10 с задержкой между пакетами
+                batch_size = 10
+                for i in range(0, len(stocks), batch_size):
+                    batch = stocks[i:i + batch_size]
+                    for stock in batch:
+                        try:
+                            response = await client.instruments.share_by(
+                                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                                class_code="TQBR",
+                                id=stock.ticker
+                            )
+                            stock.figi = response.instrument.figi
+                            session.add(stock)
+                            logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
+                        except TinkoffInvestError as e:
+                            if "RESOURCE_EXHAUSTED" in str(e):
+                                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                                logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
+                                await asyncio.sleep(reset_time)
+                                # Повторяем запрос после ожидания
+                                response = await client.instruments.share_by(
+                                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                                    class_code="TQBR",
+                                    id=stock.ticker
+                                )
+                                stock.figi = response.instrument.figi
+                                session.add(stock)
+                                logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
+                            else:
+                                logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+                                continue
+                        except Exception as e:
+                            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+                            continue
+                        # Задержка между запросами в пакете
+                        await asyncio.sleep(0.5)  # 0.5 секунды между запросами
+                    # Задержка между пакетами
+                    await asyncio.sleep(5)  # 5 секунд между пакетами
                 await session.commit()
                 logger.info("Обновление FIGI завершено")
         except Exception as e:

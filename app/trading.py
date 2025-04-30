@@ -1,10 +1,12 @@
 # app/trading.py
 import logging
+import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models import Stock, Subscription, TradeHistory, User
 from datetime import datetime, timedelta
 from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType
+from tinkoff.invest.exceptions import TinkoffInvestError
 from aiogram import Bot
 
 # Configure logging
@@ -29,6 +31,25 @@ class TradingBot:
             await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
+        except TinkoffInvestError as e:
+            if "RESOURCE_EXHAUSTED" in str(e):
+                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
+                await asyncio.sleep(reset_time)
+                # Повторяем запрос после ожидания
+                response = await client.instruments.share_by(
+                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                    class_code="TQBR",
+                    id=stock.ticker
+                )
+                stock.figi = response.instrument.figi
+                session.add(stock)
+                await session.commit()
+                logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
+                return stock.figi
+            else:
+                logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+                return None
         except Exception as e:
             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
             return None
@@ -180,6 +201,9 @@ class TradingBot:
                             )
                             session.add(trade)
                             await session.commit()
+
+                    # Добавляем небольшую задержку между акциями, чтобы не превысить лимиты API
+                    await asyncio.sleep(0.5)  # Задержка 0.5 секунды между запросами
 
                 self.status = "Ожидание следующего цикла"
                 logger.info(f"Статус бота для пользователя {user_id}: {self.status}")
