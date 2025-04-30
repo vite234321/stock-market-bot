@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.models import Stock, Subscription, TradeHistory, User
 from datetime import datetime, timedelta
 from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType
-from tinkoff.invest.exceptions import TinkoffInvestError
+from tinkoff.invest.exceptions import InvestError  # Заменяем TinkoffInvestError на InvestError
 from aiogram import Bot
 
 # Configure logging
@@ -31,14 +31,14 @@ class TradingBot:
             await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
-        except TinkoffInvestError as e:
+        except InvestError as e:  # Заменяем TinkoffInvestError на InvestError
             if "RESOURCE_EXHAUSTED" in str(e):
                 reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
                 logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
                 await asyncio.sleep(reset_time)
                 # Повторяем запрос после ожидания
                 response = await client.instruments.share_by(
-                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                    id_type=InstrumentIdType.INSTRUMENTITATION_ID_TYPE_TICKER,
                     class_code="TQBR",
                     id=stock.ticker
                 )
