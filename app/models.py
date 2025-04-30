@@ -21,6 +21,7 @@ class Stock(Base):
     last_price = Column(Float, nullable=True)
     volume = Column(Integer, nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
+    figi = Column(String, nullable=True)  # Добавляем поле figi
 
 class Subscription(Base):
     __tablename__ = "subscriptions"
