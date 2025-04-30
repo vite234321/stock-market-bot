@@ -1,117 +1,106 @@
 # app/trading.py
 import logging
-from tinkoff.invest import Client, RequestError
-from tinkoff.invest.services import InstrumentsService, MarketDataService, OperationsService
-from app.models import Signal, User
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
+from app.models import Stock, Subscription, TradeHistory, UserBalance
+from datetime import datetime, timedelta
 
-# Настройка логирования
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TradingBot:
     async def analyze_and_trade(self, session: AsyncSession, user_id: int):
-        logger.info(f"Запуск автоторговли для пользователя {user_id}")
+        logger.info(f"Запуск анализа и торговли для пользователя {user_id}")
         try:
-            # Получаем токен пользователя из базы
-            result = await session.execute(select(User).where(User.user_id == user_id))
-            user = result.scalars().first()
-
-            if not user or not user.tinkoff_token:
-                logger.info(f"У пользователя {user_id} не установлен токен T-Invest API")
-                return
-
-            token = user.tinkoff_token
-
-            # Получаем подписки пользователя
-            result = await session.execute(
-                select(Subscription.ticker).where(Subscription.user_id == user_id)
+            # Получаем баланс пользователя
+            balance_result = await session.execute(
+                select(UserBalance).where(UserBalance.user_id == user_id)
             )
-            subscribed_tickers = result.scalars().all()
+            user_balance = balance_result.scalars().first()
+            if not user_balance:
+                user_balance = UserBalance(user_id=user_id, balance=100000.0)
+                session.add(user_balance)
+                await session.commit()
 
-            if not subscribed_tickers:
-                logger.info(f"Пользователь {user_id} не подписан на акции для автоторговли")
+            # Получаем все акции (не только по подпискам)
+            all_stocks_result = await session.execute(select(Stock))
+            all_stocks = all_stocks_result.scalars().all()
+
+            if not all_stocks:
+                logger.info("Нет доступных акций для торговли")
                 return
 
-            # Получаем сигналы для подписанных акций
-            signals = []
-            for ticker in subscribed_tickers:
-                result = await session.execute(
-                    select(Signal).where(Signal.ticker == ticker)
-                )
-                ticker_signals = result.scalars().all()
-                signals.extend(ticker_signals)
+            for stock in all_stocks:
+                # Простая стратегия: покупаем, если цена ниже скользящего среднего
+                # Для упрощения предположим, что у нас есть "средняя цена" (например, last_price за последние дни)
+                avg_price = stock.last_price * 0.95  # Пример: покупаем, если цена на 5% ниже средней
+                current_price = stock.last_price
+                volume = stock.volume if stock.volume else 0
 
-            with Client(token) as client:
-                instruments_service = client.instruments
-                market_data_service = client.market_data
-                operations_service = client.operations
+                # Условие для покупки: цена ниже средней и высокий объём торгов
+                if current_price < avg_price and volume > 10000:
+                    quantity = min(int(user_balance.balance // current_price), 10)  # Покупаем не более 10 акций
+                    if quantity > 0:
+                        total_cost = quantity * current_price
+                        if total_cost <= user_balance.balance:
+                            user_balance.balance -= total_cost
+                            user_balance.updated_at = datetime.utcnow()
+                            trade = TradeHistory(
+                                user_id=user_id,
+                                ticker=stock.ticker,
+                                action="buy",
+                                price=current_price,
+                                quantity=quantity,
+                                total=total_cost,
+                                created_at=datetime.utcnow()
+                            )
+                            session.add(trade)
+                            logger.info(f"Куплено {quantity} акций {stock.ticker} по цене {current_price} для пользователя {user_id}")
+                            await session.commit()
 
-                for signal in signals:
-                    ticker = signal.ticker
-                    signal_type = signal.signal_type
-                    signal_value = signal.value
+                # Условие для продажи: цена выросла на 10% от средней
+                if current_price > avg_price * 1.10:
+                    # Проверяем, есть ли у пользователя акции для продажи
+                    bought_trades = await session.execute(
+                        select(TradeHistory).where(
+                            TradeHistory.user_id == user_id,
+                            TradeHistory.ticker == stock.ticker,
+                            TradeHistory.action == "buy"
+                        )
+                    )
+                    bought_trades = bought_trades.scalars().all()
+                    total_bought = sum(trade.quantity for trade in bought_trades)
 
-                    # Исправлено: "и" заменено на "and"
-                    if signal_type == "BUY" and signal_value > 0.5:
-                        await self._execute_buy(client, ticker, user_id)
-                    elif signal_type == "SELL" and signal_value > 0.5:
-                        await self._execute_sell(client, ticker, user_id)
+                    sold_trades = await session.execute(
+                        select(TradeHistory).where(
+                            TradeHistory.user_id == user_id,
+                            TradeHistory.ticker == stock.ticker,
+                            TradeHistory.action == "sell"
+                        )
+                    )
+                    sold_trades = sold_trades.scalars().all()
+                    total_sold = sum(trade.quantity for trade in sold_trades)
+
+                    available_to_sell = total_bought - total_sold
+                    if available_to_sell > 0:
+                        quantity = min(available_to_sell, 10)  # Продаём не более 10 акций
+                        total_revenue = quantity * current_price
+                        user_balance.balance += total_revenue
+                        user_balance.updated_at = datetime.utcnow()
+                        trade = TradeHistory(
+                            user_id=user_id,
+                            ticker=stock.ticker,
+                            action="sell",
+                            price=current_price,
+                            quantity=quantity,
+                            total=total_revenue,
+                            created_at=datetime.utcnow()
+                        )
+                        session.add(trade)
+                        logger.info(f"Продано {quantity} акций {stock.ticker} по цене {current_price} для пользователя {user_id}")
+                        await session.commit()
 
         except Exception as e:
             logger.error(f"Ошибка автоторговли для пользователя {user_id}: {e}")
-
-    async def _execute_buy(self, client, ticker, user_id):
-        try:
-            # Поиск инструмента по тикеру
-            instruments_service = client.instruments
-            instruments = instruments_service.shares().instruments
-            instrument = next((i for i in instruments if i.ticker == ticker), None)
-
-            if not instrument:
-                logger.warning(f"Инструмент {ticker} не найден")
-                return
-
-            figi = instrument.figi
-            market_data_service = client.market_data
-            last_price = market_data_service.get_last_prices(figi=[figi]).last_prices[0].price
-            last_price = last_price.units + last_price.nano / 1_000_000_000
-
-            # Покупаем 1 лот
-            quantity = 1
-            logger.info(f"Покупка {quantity} лотов {ticker} по цене {last_price} для пользователя {user_id}")
-
-            # Здесь должна быть реальная операция покупки через client.orders.post_order()
-            # Для примера просто логируем
-            logger.info(f"Успешная покупка {ticker} для пользователя {user_id}")
-
-        except RequestError as e:
-            logger.error(f"Ошибка покупки {ticker} для пользователя {user_id}: {e}")
-
-    async def _execute_sell(self, client, ticker, user_id):
-        try:
-            # Поиск инструмента по тикеру
-            instruments_service = client.instruments
-            instruments = instruments_service.shares().instruments
-            instrument = next((i for i in instruments if i.ticker == ticker), None)
-
-            if not instrument:
-                logger.warning(f"Инструмент {ticker} не найден")
-                return
-
-            figi = instrument.figi
-            market_data_service = client.market_data
-            last_price = market_data_service.get_last_prices(figi=[figi]).last_prices[0].price
-            last_price = last_price.units + last_price.nano / 1_000_000_000
-
-            # Продаём 1 лот
-            quantity = 1
-            logger.info(f"Продажа {quantity} лотов {ticker} по цене {last_price} для пользователя {user_id}")
-
-            # Здесь должна быть реальная операция продажи через client.orders.post_order()
-            # Для примера просто логируем
-            logger.info(f"Успешная продажа {ticker} для пользователя {user_id}")
-
-        except RequestError as e:
-            logger.error(f"Ошибка продажи {ticker} для пользователя {user_id}: {e}")
+            raise

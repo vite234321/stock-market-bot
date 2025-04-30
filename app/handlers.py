@@ -1,12 +1,12 @@
 # app/handlers.py
 from aiogram import Router, Bot
-from aiogram.filters import Command  # Убираем RegexpFilter
+from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
-from app.models import Stock, Subscription, Signal, User
-from sqlalchemy import select
-from datetime import datetime
+from app.models import Stock, Subscription, Signal, User, TradeHistory, UserBalance
+from sqlalchemy import select, func
+from datetime import datetime, timedelta
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +24,9 @@ def get_main_menu():
         [InlineKeyboardButton(text="📊 Сигналы", callback_data="signals")],
         [InlineKeyboardButton(text="🔑 Установить токен", callback_data="set_token")],
         [InlineKeyboardButton(text="🤖 Автоторговля", callback_data="autotrading_menu")],
+        [InlineKeyboardButton(text="📜 История торгов", callback_data="trade_history")],
+        [InlineKeyboardButton(text="💰 Баланс", callback_data="balance")],
+        [InlineKeyboardButton(text="📅 Дневная статистика", callback_data="daily_stats")],
     ])
     return keyboard
 
@@ -50,7 +53,10 @@ async def cmd_start(message: Message):
         "🔔 Подписаться на уведомления\n"
         "📊 Показать сигналы роста\n"
         "🔑 Установить токен для автоторговли\n"
-        "🤖 Настроить автоторговлю\n\n"
+        "🤖 Настроить автоторговлю\n"
+        "📜 Показать историю торгов\n"
+        "💰 Показать баланс\n"
+        "📅 Показать дневную статистику\n\n"
         "Выберите действие в меню 👇"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu())
@@ -60,7 +66,6 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список своих акций")
     try:
-        # Получаем тикеры, на которые подписан пользователь
         result = await session.execute(
             select(Subscription.ticker).where(Subscription.user_id == user_id)
         )
@@ -70,7 +75,6 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.message.answer("Вы не подписаны ни на одну акцию. Нажмите 'Подписаться', чтобы добавить акции.")
             return
 
-        # Получаем акции, на которые подписан пользователь
         result = await session.execute(
             select(Stock).where(Stock.ticker.in_(subscribed_tickers))
         )
@@ -80,16 +84,15 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.message.answer("Акции не найдены. Попробуйте позже.")
             return
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        response = "📋 <b>Ваши акции:</b>\n\n"
         for stock in stocks:
-            ticker = stock.ticker
             price = stock.last_price if stock.last_price is not None else "N/A"
-            button_text = f"{ticker}: {stock.name} ({price} RUB)"
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
-            ])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
-        await callback_query.message.answer("📋 <b>Ваши акции:</b>", parse_mode="HTML", reply_markup=keyboard)
+            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
+        response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+        ])
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении акций: {e}")
         await callback_query.message.answer("Произошла ошибка при получении акций.")
@@ -100,7 +103,6 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список всех акций")
     try:
-        # Получаем все акции из таблицы stocks
         result = await session.execute(select(Stock))
         stocks = result.scalars().all()
 
@@ -108,16 +110,15 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
             return
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
-            ticker = stock.ticker
             price = stock.last_price if stock.last_price is not None else "N/A"
-            button_text = f"{ticker}: {stock.name} ({price} RUB)"
-            keyboard.inline_keyboard.append([
-                InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
-            ])
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
-        await callback_query.message.answer("📈 <b>Все доступные акции:</b>", parse_mode="HTML", reply_markup=keyboard)
+            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
+        response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+        ])
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций: {e}")
         await callback_query.message.answer("Произошла ошибка при получении списка акций.")
@@ -147,7 +148,6 @@ async def prompt_set_token(callback_query: CallbackQuery):
     await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t.):")
     await callback_query.answer()
 
-# Используем лямбда-функцию вместо RegexpFilter
 @router.message(lambda message: message.text.startswith('t.'))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
@@ -155,15 +155,12 @@ async def save_token(message: Message, session: AsyncSession):
     logger.info(f"Пользователь {user_id} ввёл токен T-Invest API: {token[:10]}...")
 
     try:
-        # Проверяем, есть ли пользователь в базе
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
         if user:
-            # Обновляем токен
             user.tinkoff_token = token
         else:
-            # Создаём нового пользователя
             new_user = User(user_id=user_id, tinkoff_token=token)
             session.add(new_user)
 
@@ -184,7 +181,6 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил просмотр профиля")
     try:
-        # Проверяем, есть ли пользователь в базе
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
@@ -192,7 +188,6 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его через меню.")
             return
 
-        # Получаем подписки пользователя
         result = await session.execute(
             select(Subscription.ticker).where(Subscription.user_id == user_id)
         )
@@ -215,7 +210,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} включил автоторговлю")
     try:
-        # Проверяем, есть ли пользователь в базе
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
@@ -236,7 +230,6 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} выключил автоторговлю")
     try:
-        # Проверяем, есть ли пользователь в базе
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
@@ -250,6 +243,105 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "trade_history")
+async def trade_history(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил историю торгов")
+    try:
+        result = await session.execute(
+            select(TradeHistory).where(TradeHistory.user_id == user_id).order_by(TradeHistory.created_at.desc()).limit(10)
+        )
+        trades = result.scalars().all()
+
+        if not trades:
+            await callback_query.message.answer("📜 У вас пока нет истории торгов.")
+            return
+
+        response = "📜 <b>История торгов (последние 10):</b>\n\n"
+        for trade in trades:
+            action = "Покупка" if trade.action == "buy" else "Продажа"
+            response += f"🕒 {trade.created_at.strftime('%Y-%m-%d %H:%M:%S')} | {action} | {trade.ticker} | {trade.quantity} акций | {trade.price} RUB | Итог: {trade.total} RUB\n"
+        response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+        ])
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при получении истории торгов: {e}")
+        await callback_query.message.answer("❌ Ошибка при получении истории торгов.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "balance")
+async def balance(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил баланс")
+    try:
+        result = await session.execute(
+            select(UserBalance).where(UserBalance.user_id == user_id)
+        )
+        user_balance = result.scalars().first()
+
+        if not user_balance:
+            user_balance = UserBalance(user_id=user_id, balance=100000.0)
+            session.add(user_balance)
+            await session.commit()
+
+        response = f"💰 <b>Ваш баланс:</b> {user_balance.balance:.2f} RUB\n"
+        response += f"🕒 Обновлено: {user_balance.updated_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        response += "\n⬅️ Вернуться в меню с помощью кнопки ниже."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+        ])
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при получении баланса: {e}")
+        await callback_query.message.answer("❌ Ошибка при получении баланса.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "daily_stats")
+async def daily_stats(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил дневную статистику")
+    try:
+        today = datetime.utcnow().date()
+        start_of_day = datetime.combine(today, datetime.min.time())
+        end_of_day = datetime.combine(today, datetime.max.time())
+
+        result = await session.execute(
+            select(TradeHistory).where(
+                TradeHistory.user_id == user_id,
+                TradeHistory.created_at >= start_of_day,
+                TradeHistory.created_at <= end_of_day
+            )
+        )
+        trades = result.scalars().all()
+
+        if not trades:
+            await callback_query.message.answer("📅 Сегодня не было торгов.")
+            return
+
+        total_trades = len(trades)
+        total_buy = sum(trade.total for trade in trades if trade.action == "buy")
+        total_sell = sum(trade.total for trade in trades if trade.action == "sell")
+        profit = total_sell - total_buy
+
+        response = (
+            f"📅 <b>Дневная статистика ({today.strftime('%Y-%m-%d')}):</b>\n\n"
+            f"🔄 Всего сделок: {total_trades}\n"
+            f"📉 Покупки: {total_buy:.2f} RUB\n"
+            f"📈 Продажи: {total_sell:.2f} RUB\n"
+            f"📊 Прибыль: {profit:.2f} RUB\n"
+            f"\n⬅️ Вернуться в меню с помощью кнопки ниже."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")]
+        ])
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при получении дневной статистики: {e}")
+        await callback_query.message.answer("❌ Ошибка при получении дневной статистики.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_menu")
