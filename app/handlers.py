@@ -1,6 +1,6 @@
 # app/handlers.py
 from aiogram import Router, Bot
-from aiogram.filters import Command, Regexp  # Используем Regexp из aiogram.filters
+from aiogram.filters import Command, RegexpFilter  # Исправляем на RegexpFilter
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -147,8 +147,8 @@ async def prompt_set_token(callback_query: CallbackQuery):
     await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t_):")
     await callback_query.answer()
 
-# Используем Regexp фильтр для обработки токенов, начинающихся с t_
-@router.message(Regexp(regexp=r'^t_.*'))
+# Используем RegexpFilter для обработки токенов, начинающихся с t_
+@router.message(RegexpFilter(regexp=r'^t_.*'))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     token = message.text.strip()
