@@ -25,6 +25,10 @@ app = FastAPI()
 # Выводим версию aiogram в логи
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
+# Выводим содержимое handlers.py для отладки
+with open("app/handlers.py", "r", encoding="utf-8") as f:
+    logger.info(f"Содержимое handlers.py на Heroku:\n{f.read()}")
+
 # Инициализация бота
 bot = Bot(
     token=os.getenv("BOT_TOKEN"),
