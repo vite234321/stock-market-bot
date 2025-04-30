@@ -1,14 +1,15 @@
 # app/api.py
 from fastapi import FastAPI
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram import Bot, types
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 from app.database import init_db, async_session
 from app.trading import TradingBot
-from app.models import User  # Добавляем импорт модели User
-from sqlalchemy import select, text  # Импортируем text
+from app.models import User
+from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import logging
 import os
@@ -26,9 +27,6 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 
-# Инициализация диспетчера
-dp = Dispatcher()
-
 # Инициализация торгового бота
 trading_bot = TradingBot()
 
@@ -36,10 +34,7 @@ trading_bot = TradingBot()
 scheduler = AsyncIOScheduler()
 
 # Регистрация middleware
-dp.update.middleware(DbSessionMiddleware())
-
-# Регистрация роутера
-dp.include_router(router)
+router.middleware(DbSessionMiddleware())
 
 async def run_autotrading():
     logger.info("Запуск автоторговли для всех пользователей")
@@ -62,6 +57,10 @@ async def run_autotrading():
         except Exception as e:
             logger.error(f"Ошибка при запуске автоторговли: {e}")
 
+async def process_update(update: dict):
+    update_obj = types.Update(**update)
+    await router.feed_update(bot=bot, update=update_obj)
+
 @app.on_event("startup")
 async def on_startup():
     logger.info("Запуск бота...")
@@ -72,12 +71,12 @@ async def on_startup():
     except Exception as e:
         logger.error(f"Не удалось инициализировать базу данных: {e}")
         logger.warning("Продолжаем работу без базы данных. Некоторые функции могут быть недоступны.")
-    # Удаляем вебхук и очищаем очередь обновлений
+    # Удаляем вебхук и начинаем polling
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удален, очередь обновлений очищена")
     logger.info("Запуск polling на Heroku")
     # Запускаем polling в фоновом режиме
-    asyncio.create_task(dp.start_polling(bot))
+    asyncio.create_task(bot.polling())
     # Запускаем автоторговлю каждые 5 минут
     scheduler.add_job(run_autotrading, "interval", minutes=5)
     scheduler.start()
@@ -86,7 +85,6 @@ async def on_startup():
 async def on_shutdown():
     logger.info("Остановка бота...")
     scheduler.shutdown()
-    await dp.stop_polling()
     await bot.session.close()
 
 @app.post("/signals")
