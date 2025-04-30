@@ -4,5 +4,5 @@ uvicorn==0.27.1
 sqlalchemy[asyncio]==2.0.27
 asyncpg==0.29.0
 apscheduler==3.10.4
-tinkoff-invest==1.0.5
+tinkoff-investments==0.2.0b111
 matplotlib==3.8.4
