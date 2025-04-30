@@ -7,6 +7,8 @@ from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 from app.database import init_db, async_session
 from app.trading import TradingBot
+from app.models import User  # Добавляем импорт модели User
+from sqlalchemy import select, text  # Импортируем text
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import logging
 import os
@@ -42,16 +44,23 @@ dp.include_router(router)
 async def run_autotrading():
     logger.info("Запуск автоторговли для всех пользователей")
     async with async_session() as session:
-        # Получаем пользователей с включённой автоторговлей
-        result = await session.execute("SELECT DISTINCT user_id FROM users WHERE tinkoff_token IS NOT NULL AND autotrading_enabled = TRUE")
-        user_ids = [row[0] for row in result.fetchall()]
-        for user_id in user_ids:
-            await trading_bot.analyze_and_trade(session, user_id)
-            # Уведомляем пользователя о запуске торговли
-            try:
-                await bot.send_message(user_id, "🤖 Запущена автоторговля для ваших акций!")
-            except Exception as e:
-                logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        try:
+            # Используем ORM вместо сырого SQL-запроса
+            result = await session.execute(
+                select(User.user_id).where(
+                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
+                ).distinct()
+            )
+            user_ids = [row[0] for row in result.fetchall()]
+            for user_id in user_ids:
+                await trading_bot.analyze_and_trade(session, user_id)
+                # Уведомляем пользователя о запуске торговли
+                try:
+                    await bot.send_message(user_id, "🤖 Запущена автоторговля для ваших акций!")
+                except Exception as e:
+                    logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка при запуске автоторговли: {e}")
 
 @app.on_event("startup")
 async def on_startup():

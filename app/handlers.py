@@ -1,6 +1,6 @@
 # app/handlers.py
 from aiogram import Router, Bot
-from aiogram.filters import Command, Text
+from aiogram.filters import Command, RegexpFilter  # Заменяем Text на RegexpFilter
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -18,12 +18,12 @@ router = Router()
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks")],
-        [InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks")],  # Новая кнопка
+        [InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks")],
         [InlineKeyboardButton(text="🔍 Цена акции", callback_data="check_price")],
         [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe")],
         [InlineKeyboardButton(text="📊 Сигналы", callback_data="signals")],
         [InlineKeyboardButton(text="🔑 Установить токен", callback_data="set_token")],
-        [InlineKeyboardButton(text="🤖 Автоторговля", callback_data="autotrading_menu")],  # Новая кнопка
+        [InlineKeyboardButton(text="🤖 Автоторговля", callback_data="autotrading_menu")],
     ])
     return keyboard
 
@@ -147,8 +147,8 @@ async def prompt_set_token(callback_query: CallbackQuery):
     await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t_):")
     await callback_query.answer()
 
-# Исправлен фильтр для токена
-@router.message(Text(startswith="t_"))
+# Исправляем фильтр для токена с использованием RegexpFilter
+@router.message(RegexpFilter(regexp_commands=['t_.*']))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     token = message.text.strip()
@@ -214,16 +214,42 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
 async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} включил автоторговлю")
-    # Здесь можно добавить логику для активации автоторговли
-    await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
+    try:
+        # Проверяем, есть ли пользователь в базе
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalars().first()
+
+        if not user:
+            await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен T-Invest API.")
+            return
+
+        user.autotrading_enabled = True
+        await session.commit()
+        await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {e}")
+        await callback_query.message.answer("❌ Ошибка при включении автоторговли.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "disable_autotrading")
 async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} выключил автоторговлю")
-    # Здесь можно добавить логику для отключения автоторговли
-    await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
+    try:
+        # Проверяем, есть ли пользователь в базе
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalars().first()
+
+        if not user:
+            await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен T-Invest API.")
+            return
+
+        user.autotrading_enabled = False
+        await session.commit()
+        await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
+        await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_menu")
