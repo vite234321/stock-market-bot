@@ -1,35 +1,25 @@
+# app/middlewares.py
 from aiogram import BaseMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database import get_db
 from typing import Callable, Dict, Any, Awaitable
 
 class DbSessionMiddleware(BaseMiddleware):
+    def __init__(self, session_factory):
+        super().__init__()
+        self.session_factory = session_factory
+
     async def __call__(
         self,
         handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
         event: Any,
         data: Dict[str, Any],
     ) -> Any:
-        # Получаем генератор сессии
-        session_gen = get_db()
-        # Извлекаем сессию из генератора
-        session = await anext(session_gen)
-        try:
-            # Передаём сессию в обработчик через data
+        async with self.session_factory() as session:
             data["session"] = session
-            result = await handler(event, data)
-            # Подтверждаем транзакцию, если всё прошло успешно
-            await session.commit()
-            return result
-        except Exception as e:
-            # Откатываем транзакцию в случае ошибки
-            await session.rollback()
-            raise e
-        finally:
-            # Закрываем сессию
-            await session.close()
-            # Закрываем генератор
             try:
-                await anext(session_gen)
-            except StopAsyncIteration:
-                pass
+                result = await handler(event, data)
+                await session.commit()
+                return result
+            except Exception as e:
+                await session.rollback()
+                raise e

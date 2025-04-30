@@ -1,19 +1,28 @@
 # app/handlers.py
 from aiogram import Router, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
-from tinkoff.invest import AsyncClient
+from tinkoff.invest import AsyncClient, CandleInterval
+import matplotlib.pyplot as plt
+import os
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+# Маппинг ticker -> FIGI (в реальном проекте можно хранить в базе данных)
+TICKER_TO_FIGI = {
+    "SBER.ME": "BBG004730N88",
+    "GAZP.ME": "BBG004730RP0",
+    # Добавьте другие тикеры и их FIGI
+}
 
 # Главное меню
 def get_main_menu():
@@ -30,8 +39,9 @@ def get_stocks_menu():
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks"),
          InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks")],
         [InlineKeyboardButton(text="🔍 Проверить цену", callback_data="check_price"),
-         InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe")],
-        [InlineKeyboardButton(text="📊 Сигналы роста", callback_data="signals")],
+         InlineKeyboardButton(text="📉 График цены", callback_data="price_chart")],
+        [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe"),
+         InlineKeyboardButton(text="📊 Сигналы роста", callback_data="signals")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main")],
     ])
     return keyboard
@@ -168,6 +178,76 @@ async def prompt_check_price(callback_query: CallbackQuery):
     await callback_query.message.answer("🔍 Введите тикер акции (например, SBER.ME):")
     await callback_query.answer()
 
+@router.callback_query(lambda c: c.data == "price_chart")
+async def prompt_price_chart(callback_query: CallbackQuery):
+    logger.info(f"Пользователь {callback_query.from_user.id} хочет увидеть график цены акции")
+    await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER.ME):")
+    await callback_query.answer()
+
+@router.message(lambda message: message.text in TICKER_TO_FIGI.keys())
+async def generate_price_chart(message: Message, session: AsyncSession):
+    user_id = message.from_user.id
+    ticker = message.text.strip()
+    logger.info(f"Пользователь {user_id} запросил график цены для {ticker}")
+
+    try:
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = user_result.scalars().first()
+        if not user or not user.tinkoff_token:
+            await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            return
+
+        figi = TICKER_TO_FIGI.get(ticker)
+        if not figi:
+            await message.answer(f"Тикер {ticker} не поддерживается. Попробуйте SBER.ME или GAZP.ME.")
+            return
+
+        async with AsyncClient(user.tinkoff_token) as client:
+            # Получаем свечи за последние 30 дней
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=30)
+            candles = await client.market_data.get_candles(
+                figi=figi,
+                from_=start_date,
+                to=end_date,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY
+            )
+
+            if not candles.candles:
+                await message.answer(f"Данные для {ticker} не найдены.")
+                return
+
+            # Извлекаем данные для графика
+            dates = [candle.time for candle in candles.candles]
+            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+
+            # Генерируем график
+            plt.figure(figsize=(10, 5))
+            plt.plot(dates, prices, marker='o', linestyle='-', color='b')
+            plt.title(f"График цены {ticker} (30 дней)")
+            plt.xlabel("Дата")
+            plt.ylabel("Цена (RUB)")
+            plt.grid(True)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+
+            # Сохраняем график во временный файл
+            chart_path = f"chart_{user_id}_{ticker}.png"
+            plt.savefig(chart_path)
+            plt.close()
+
+            # Отправляем график в Telegram
+            chart_file = FSInputFile(chart_path)
+            await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
+
+            # Удаляем временный файл
+            os.remove(chart_path)
+    except Exception as e:
+        logger.error(f"Ошибка при построении графика для {ticker}: {e}")
+        await message.answer("❌ Ошибка при построении графика.")
+
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет подписаться на акции")
@@ -231,11 +311,46 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
         )
         subscribed_tickers = result.scalars().all()
 
+        # Получаем статистику
+        total_trades_result = await session.execute(
+            select(func.count(TradeHistory.id)).where(TradeHistory.user_id == user_id)
+        )
+        total_trades = total_trades_result.scalar()
+
+        total_buy_result = await session.execute(
+            select(func.sum(TradeHistory.total)).where(TradeHistory.user_id == user_id, TradeHistory.action == "buy")
+        )
+        total_buy = total_buy_result.scalar() or 0
+
+        total_sell_result = await session.execute(
+            select(func.sum(TradeHistory.total)).where(TradeHistory.user_id == user_id, TradeHistory.action == "sell")
+        )
+        total_sell = total_sell_result.scalar() or 0
+
+        profit = total_sell - total_buy
+
+        # Получаем баланс через T-Invest API
+        async with AsyncClient(user.tinkoff_token) as client:
+            accounts = await client.users.get_accounts()
+            if not accounts.accounts:
+                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
+                return
+            account_id = accounts.accounts[0].id
+
+            portfolio = await client.operations.get_portfolio(account_id=account_id)
+            total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
+
         profile_text = (
             f"📊 <b>Ваш профиль</b>\n\n"
             f"🆔 Ваш ID: {user_id}\n"
             f"🔑 Токен T-Invest API: {user.tinkoff_token[:10]}...\n"
             f"📋 Подписки: {', '.join(subscribed_tickers) if subscribed_tickers else 'Нет подписок'}\n"
+            f"🤖 Статус автоторговли: {'Активна' if user.autotrading_enabled else 'Отключена'}\n"
+            f"💰 Текущий баланс: {total_balance:.2f} RUB\n"
+            f"🔄 Всего сделок: {total_trades}\n"
+            f"📉 Покупки: {total_buy:.2f} RUB\n"
+            f"📈 Продажи: {total_sell:.2f} RUB\n"
+            f"📊 Прибыль: {profit:.2f} RUB\n"
         )
         await callback_query.message.answer(profile_text, parse_mode="HTML", reply_markup=get_autotrading_menu())
     except Exception as e:
@@ -244,7 +359,7 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "enable_autotrading")
-async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
+async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} включил автоторговлю")
     try:
@@ -258,13 +373,15 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         user.autotrading_enabled = True
         await session.commit()
         await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
+        # Отправляем уведомление
+        await bot.send_message(user_id, "🤖 Бот начал анализ рынка и поиск возможностей для торговли.")
     except Exception as e:
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при включении автоторговли.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "disable_autotrading")
-async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
+async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} выключил автоторговлю")
     try:
@@ -278,6 +395,8 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
         user.autotrading_enabled = False
         await session.commit()
         await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
+        # Отправляем уведомление
+        await bot.send_message(user_id, "🤖 Бот прекратил торговлю.")
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")

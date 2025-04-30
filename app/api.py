@@ -25,8 +25,12 @@ app = FastAPI()
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
 # Инициализация бота
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+
 bot = Bot(
-    token=os.getenv("BOT_TOKEN"),
+    token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 
@@ -37,10 +41,10 @@ dp = Dispatcher()
 dp.include_router(router)
 
 # Регистрируем middleware через диспетчер
-dp.update.middleware(DbSessionMiddleware())
+dp.update.middleware(DbSessionMiddleware(async_session))
 
 # Инициализация торгового бота
-trading_bot = TradingBot()
+trading_bot = TradingBot(bot)
 
 # Инициализация планировщика
 scheduler = AsyncIOScheduler()
@@ -50,17 +54,18 @@ async def run_autotrading():
     async with async_session() as session:
         try:
             result = await session.execute(
-                select(User.user_id).where(
+                select(User).where(
                     (User.tinkoff_token != None) & (User.autotrading_enabled == True)
-                ).distinct()
+                )
             )
-            user_ids = [row[0] for row in result.fetchall()]
-            for user_id in user_ids:
-                await trading_bot.analyze_and_trade(session, user_id)
-                try:
-                    await bot.send_message(user_id, "🤖 Запущена автоторговля для ваших акций!")
-                except Exception as e:
-                    logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+            users = result.scalars().all()
+            if not users:
+                logger.info("Нет пользователей с включённой автоторговлей")
+                return
+            for user in users:
+                logger.info(f"Обработка пользователя {user.user_id}")
+                await trading_bot.analyze_and_trade(session, user.user_id)
+                logger.info(f"Статус бота для пользователя {user.user_id}: {trading_bot.get_status()}")
         except Exception as e:
             logger.error(f"Ошибка при запуске автоторговли: {e}")
 
@@ -73,7 +78,7 @@ async def on_startup():
         logger.info("База данных успешно инициализирована.")
     except Exception as e:
         logger.error(f"Не удалось инициализировать базу данных: {e}")
-        logger.warning("Продолжаем работу без базы данных. Некоторые функции могут быть недоступны.")
+        raise
     # Удаляем вебхук и начинаем polling
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён, очередь обновлений очищена")
@@ -83,11 +88,13 @@ async def on_startup():
     # Запускаем автоторговлю каждые 5 минут
     scheduler.add_job(run_autotrading, "interval", minutes=5)
     scheduler.start()
+    logger.info("Планировщик запущен")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Остановка бота...")
     scheduler.shutdown()
+    await dp.stop_polling()
     await bot.session.close()
 
 @app.post("/signals")
