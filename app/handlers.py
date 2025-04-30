@@ -144,11 +144,11 @@ async def prompt_signals(callback_query: CallbackQuery):
 @router.callback_query(lambda c: c.data == "set_token")
 async def prompt_set_token(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет установить токен")
-    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t_):")
+    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t.):")
     await callback_query.answer()
 
 # Используем лямбда-функцию вместо RegexpFilter
-@router.message(lambda message: message.text.startswith('t_'))
+@router.message(lambda message: message.text.startswith('t.'))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     token = message.text.strip()
