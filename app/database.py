@@ -1,23 +1,19 @@
 # app/database.py
-import os
-import asyncio
 import logging
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase
+import os
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Получение строки подключения из переменной окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL не установлен в переменных окружения")
 
-# Преобразуем postgresql:// на postgresql+asyncpg:// (оставим asyncpg, так как он уже используется)
+# Преобразуем postgres:// в postgresql+asyncpg://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 elif DATABASE_URL.startswith("postgresql://"):
@@ -25,36 +21,38 @@ elif DATABASE_URL.startswith("postgresql://"):
 
 logger.info("Строка подключения к базе данных: %s", DATABASE_URL)
 
-# Создание асинхронного движка с отключением кэша prepared statements
-try:
-    engine = create_async_engine(
-        DATABASE_URL,
-        echo=True,
-        pool_pre_ping=True,
-        connect_args={
-            "connect_timeout": 30,
-            "statement_cache_size": 0  # Отключаем кэширование prepared statements
+# Создаём движок SQLAlchemy с использованием пула подключений asyncpg
+logger.info("Создание движка SQLAlchemy с отключением кэша prepared statements...")
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=True,
+    connect_args={
+        "statement_cache_size": 0,  # Отключаем кэш prepared statements
+        "prepared_statement_cache_size": 0,  # Дополнительно отключаем кэш на уровне asyncpg
+        "server_settings": {
+            "application_name": "stock-market-bott"
         }
-    )
-    logger.info("Движок SQLAlchemy создан успешно с отключением кэша prepared statements.")
-except Exception as e:
-    logger.error("Ошибка создания движка SQLAlchemy: %s", str(e))
-    raise
+    },
+    pool_size=5,  # Максимальное количество подключений в пуле
+    max_overflow=10,  # Максимальное количество дополнительных подключений
+    pool_timeout=30,  # Таймаут ожидания подключения
+    pool_pre_ping=True  # Проверка подключения перед использованием
+)
+logger.info("Движок SQLAlchemy создан успешно.")
 
-# Создание фабрики сессий
-async_session = sessionmaker(
+# Создаём фабрику сессий
+async_session = async_sessionmaker(
     engine,
     class_=AsyncSession,
     expire_on_commit=False
 )
-logger.info("Фабрика сессий SQLAlchemy создана успешно")
 
-# Базовый класс для моделей SQLAlchemy
-Base = declarative_base()
+class Base(DeclarativeBase):
+    pass
 
-# Функция для инициализации базы данных
+# Функция для инициализации базы данных (создание таблиц) с повторными попытками
 async def init_db():
-    for attempt in range(1, 10):
+    for attempt in range(1, 10):  # 10 попыток
         try:
             logger.info("Попытка %d: подключение к базе данных...", attempt)
             async with engine.begin() as conn:
@@ -67,4 +65,9 @@ async def init_db():
             if attempt == 9:
                 logger.error("Не удалось подключиться к базе данных после 10 попыток. Завершаем работу.")
                 raise
-            await asyncio.sleep(10)
+            await asyncio.sleep(10)  # Задержка 10 секунд перед следующей попыткой
+
+# Функция для получения сессии базы данных
+async def get_db() -> AsyncSession:
+    async with async_session() as session:
+        yield session
