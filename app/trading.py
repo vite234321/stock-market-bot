@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType
 from tinkoff.invest.exceptions import InvestError
 from aiogram import Bot
+import html
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,50 +30,11 @@ class TradingBot:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
     async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession):
-        """Обновляет FIGI для акции через Tinkoff API, если его нет в базе."""
-        try:
-            # Исправляем тикер, убирая .ME
-            original_ticker = stock.ticker
-            stock.ticker = stock.ticker.replace('.ME', '')
-            if original_ticker != stock.ticker:
-                logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
-                session.add(stock)
-                await session.commit()
-
-            response = await client.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,  # Исправлено
-                class_code="TQBR",
-                id=stock.ticker
-            )
-            stock.figi = response.instrument.figi
-            session.add(stock)
-            await session.commit()
-            logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
+        """Проверяет наличие FIGI в базе. Если его нет, логирует предупреждение."""
+        if stock.figi:
             return stock.figi
-        except InvestError as e:
-            if "NOT_FOUND" in str(e):
-                logger.error(f"Инструмент {stock.ticker} не найден в API")
-                return None
-            elif "RESOURCE_EXHAUSTED" in str(e):
-                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
-                logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
-                await asyncio.sleep(reset_time)
-                response = await client.instruments.share_by(
-                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,  # Исправлено
-                    class_code="TQBR",
-                    id=stock.ticker
-                )
-                stock.figi = response.instrument.figi
-                session.add(stock)
-                await session.commit()
-                logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
-                return stock.figi
-            else:
-                logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                return None
-        except Exception as e:
-            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-            return None
+        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе. Ожидается, что stock-market-collector обновит FIGI.")
+        return None
 
     async def analyze_and_trade(self, session: AsyncSession, user_id: int):
         logger.info(f"Запуск анализа и торговли для пользователя {user_id}")
@@ -91,7 +53,6 @@ class TradingBot:
                 return
 
             async with AsyncClient(user.tinkoff_token) as client:
-                # Добавляем отладочный вызов для проверки доступных акций
                 await self.debug_available_shares(client)
 
                 accounts = await client.users.get_accounts()
@@ -125,11 +86,8 @@ class TradingBot:
                 for stock in all_stocks:
                     figi = stock.figi
                     if not figi:
-                        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пытаемся обновить...")
-                        figi = await self.update_figi(client, stock, session)
-                        if not figi:
-                            logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
-                            continue
+                        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пропускаем...")
+                        continue
 
                     end_date = datetime.utcnow()
                     start_date = end_date - timedelta(days=30)
@@ -224,7 +182,8 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка автоторговли для пользователя {user_id}: {e}")
             self.status = f"Ошибка: {str(e)}"
-            await self.bot.send_message(user_id, f"❌ Ошибка автоторговли: {str(e)}")
+            error_message = html.escape(str(e))
+            await self.bot.send_message(user_id, f"❌ Ошибка автоторговли: {error_message}")
             raise
 
     def get_status(self):
