@@ -1,5 +1,6 @@
 # app/database.py
 import logging
+import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
 import os
@@ -38,6 +39,23 @@ async_session = async_sessionmaker(
 
 class Base(DeclarativeBase):
     pass
+
+# Функция для инициализации базы данных (создание таблиц) с повторными попытками
+async def init_db():
+    for attempt in range(1, 10):  # 10 попыток
+        try:
+            logger.info("Попытка %d: подключение к базе данных...", attempt)
+            async with engine.begin() as conn:
+                logger.info("Соединение с базой данных успешно установлено.")
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Таблицы успешно созданы или уже существуют.")
+                return
+        except Exception as e:
+            logger.error("Ошибка подключения к базе данных на попытке %d: %s", attempt, str(e))
+            if attempt == 9:
+                logger.error("Не удалось подключиться к базе данных после 10 попыток. Завершаем работу.")
+                raise
+            await asyncio.sleep(10)  # Задержка 10 секунд перед следующей попыткой
 
 # Функция для получения сессии базы данных
 async def get_db() -> AsyncSession:
