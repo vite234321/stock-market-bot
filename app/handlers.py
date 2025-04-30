@@ -1,6 +1,6 @@
 # app/handlers.py
 from aiogram import Router, Bot
-from aiogram.filters import Command
+from aiogram.filters import Command, Text
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -18,10 +18,22 @@ router = Router()
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks")],
+        [InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks")],  # Новая кнопка
         [InlineKeyboardButton(text="🔍 Цена акции", callback_data="check_price")],
         [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe")],
         [InlineKeyboardButton(text="📊 Сигналы", callback_data="signals")],
         [InlineKeyboardButton(text="🔑 Установить токен", callback_data="set_token")],
+        [InlineKeyboardButton(text="🤖 Автоторговля", callback_data="autotrading_menu")],  # Новая кнопка
+    ])
+    return keyboard
+
+# Меню автоторговли
+def get_autotrading_menu():
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Мой профиль", callback_data="view_profile")],
+        [InlineKeyboardButton(text="▶️ Включить автоторговлю", callback_data="enable_autotrading")],
+        [InlineKeyboardButton(text="⏹️ Выключить автоторговлю", callback_data="disable_autotrading")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")],
     ])
     return keyboard
 
@@ -33,10 +45,12 @@ async def cmd_start(message: Message):
         "Я помогу следить за акциями и торговать! 🚀\n"
         "Что я умею:\n"
         "📋 Показать ваши подписки\n"
+        "📈 Показать все доступные акции\n"
         "🔍 Узнать цену акции\n"
         "🔔 Подписаться на уведомления\n"
         "📊 Показать сигналы роста\n"
-        "🔑 Установить токен для автоторговли\n\n"
+        "🔑 Установить токен для автоторговли\n"
+        "🤖 Настроить автоторговлю\n\n"
         "Выберите действие в меню 👇"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu())
@@ -81,6 +95,34 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
         await callback_query.message.answer("Произошла ошибка при получении акций.")
     await callback_query.answer()
 
+@router.callback_query(lambda c: c.data == "list_all_stocks")
+async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил список всех акций")
+    try:
+        # Получаем все акции из таблицы stocks
+        result = await session.execute(select(Stock))
+        stocks = result.scalars().all()
+
+        if not stocks:
+            await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for stock in stocks:
+            ticker = stock.ticker
+            price = stock.last_price if stock.last_price is not None else "N/A"
+            button_text = f"{ticker}: {stock.name} ({price} RUB)"
+            keyboard.inline_keyboard.append([
+                InlineKeyboardButton(text=button_text, callback_data=f"stock_{ticker}")
+            ])
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_menu")])
+        await callback_query.message.answer("📈 <b>Все доступные акции:</b>", parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при получении всех акций: {e}")
+        await callback_query.message.answer("Произошла ошибка при получении списка акций.")
+    await callback_query.answer()
+
 @router.callback_query(lambda c: c.data == "check_price")
 async def prompt_check_price(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет проверить цену акции")
@@ -102,14 +144,15 @@ async def prompt_signals(callback_query: CallbackQuery):
 @router.callback_query(lambda c: c.data == "set_token")
 async def prompt_set_token(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет установить токен")
-    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API:")
+    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t_):")
     await callback_query.answer()
 
-@router.message(lambda message: message.text and message.text.startswith("t-"))
+# Исправлен фильтр для токена
+@router.message(Text(startswith="t_"))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     token = message.text.strip()
-    logger.info(f"Пользователь {user_id} ввёл токен T-Invest API")
+    logger.info(f"Пользователь {user_id} ввёл токен T-Invest API: {token[:10]}...")
 
     try:
         # Проверяем, есть ли пользователь в базе
@@ -129,6 +172,59 @@ async def save_token(message: Message, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при сохранении токена для пользователя {user_id}: {e}")
         await message.answer("❌ Ошибка при сохранении токена. Попробуйте снова.")
+
+@router.callback_query(lambda c: c.data == "autotrading_menu")
+async def autotrading_menu(callback_query: CallbackQuery):
+    logger.info(f"Пользователь {callback_query.from_user.id} открыл меню автоторговли")
+    await callback_query.message.answer("🤖 <b>Меню автоторговли:</b>", parse_mode="HTML", reply_markup=get_autotrading_menu())
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "view_profile")
+async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил просмотр профиля")
+    try:
+        # Проверяем, есть ли пользователь в базе
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalars().first()
+
+        if not user or not user.tinkoff_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его через меню.")
+            return
+
+        # Получаем подписки пользователя
+        result = await session.execute(
+            select(Subscription.ticker).where(Subscription.user_id == user_id)
+        )
+        subscribed_tickers = result.scalars().all()
+
+        profile_text = (
+            f"📊 <b>Ваш профиль</b>\n\n"
+            f"🆔 Ваш ID: {user_id}\n"
+            f"🔑 Токен T-Invest API: {user.tinkoff_token[:10]}...\n"
+            f"📋 Подписки: {', '.join(subscribed_tickers) if subscribed_tickers else 'Нет подписок'}\n"
+        )
+        await callback_query.message.answer(profile_text, parse_mode="HTML", reply_markup=get_autotrading_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при просмотре профиля пользователя {user_id}: {e}")
+        await callback_query.message.answer("❌ Ошибка при просмотре профиля.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "enable_autotrading")
+async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} включил автоторговлю")
+    # Здесь можно добавить логику для активации автоторговли
+    await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "disable_autotrading")
+async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} выключил автоторговлю")
+    # Здесь можно добавить логику для отключения автоторговли
+    await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
+    await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_menu")
 async def back_to_menu(callback_query: CallbackQuery):

@@ -42,8 +42,8 @@ dp.include_router(router)
 async def run_autotrading():
     logger.info("Запуск автоторговли для всех пользователей")
     async with async_session() as session:
-        # Получаем всех пользователей из таблицы users
-        result = await session.execute("SELECT DISTINCT user_id FROM users WHERE tinkoff_token IS NOT NULL")
+        # Получаем пользователей с включённой автоторговлей
+        result = await session.execute("SELECT DISTINCT user_id FROM users WHERE tinkoff_token IS NOT NULL AND autotrading_enabled = TRUE")
         user_ids = [row[0] for row in result.fetchall()]
         for user_id in user_ids:
             await trading_bot.analyze_and_trade(session, user_id)

@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime
+from sqlalchemy import Column, Integer, String, Float, BigInteger, DateTime, Boolean
 from app.database import Base
 from datetime import datetime
 
@@ -7,8 +7,9 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(BigInteger, unique=True, index=True)  # Telegram user_id
-    tinkoff_token = Column(String, nullable=True)  # Токен T-Invest API
+    user_id = Column(BigInteger, unique=True, index=True)
+    tinkoff_token = Column(String, nullable=True)
+    autotrading_enabled = Column(Boolean, default=False)  # Новое поле
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Stock(Base):
