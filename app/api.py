@@ -4,6 +4,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram import Bot, types
+import aiogram  # Добавляем импорт для проверки версии
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 from app.database import init_db, async_session
@@ -20,6 +21,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# Выводим версию aiogram в логи
+logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
 # Инициализация бота
 bot = Bot(
