@@ -53,10 +53,10 @@ class TradingBot:
                     signal_type = signal.signal_type
                     signal_value = signal.value
 
-                    # Простая стратегия: покупаем, если сигнал "BUY" и значение > 0.5, продаём, если "SELL" и значение > 0.5
-                    if signal_type == "BUY" и signal_value > 0.5:
+                    # Исправлено: "и" заменено на "and"
+                    if signal_type == "BUY" and signal_value > 0.5:
                         await self._execute_buy(client, ticker, user_id)
-                    elif signal_type == "SELL" и signal_value > 0.5:
+                    elif signal_type == "SELL" and signal_value > 0.5:
                         await self._execute_sell(client, ticker, user_id)
 
         except Exception as e:
