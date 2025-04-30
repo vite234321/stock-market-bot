@@ -7,7 +7,7 @@ import logging
 from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
-from tinkoff.invest import AsyncClient, CandleInterval
+from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
 import matplotlib.pyplot as plt
 import os
 
@@ -16,13 +16,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = Router()
-
-# Маппинг ticker -> FIGI (в реальном проекте можно хранить в базе данных)
-TICKER_TO_FIGI = {
-    "SBER.ME": "BBG004730N88",
-    "GAZP.ME": "BBG004730RP0",
-    # Добавьте другие тикеры и их FIGI
-}
 
 # Главное меню
 def get_main_menu():
@@ -184,7 +177,24 @@ async def prompt_price_chart(callback_query: CallbackQuery):
     await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER.ME):")
     await callback_query.answer()
 
-@router.message(lambda message: message.text in TICKER_TO_FIGI.keys())
+async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession):
+    """Обновляет FIGI для акции через Tinkoff API, если его нет в базе."""
+    try:
+        response = await client.instruments.share_by(
+            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+            class_code="TQBR",  # Код рынка для акций MOEX
+            id=stock.ticker
+        )
+        stock.figi = response.instrument.figi
+        session.add(stock)
+        await session.commit()
+        logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
+        return stock.figi
+    except Exception as e:
+        logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+        return None
+
+@router.message(lambda message: message.text.endswith(".ME"))
 async def generate_price_chart(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     ticker = message.text.strip()
@@ -199,12 +209,25 @@ async def generate_price_chart(message: Message, session: AsyncSession):
             await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
             return
 
-        figi = TICKER_TO_FIGI.get(ticker)
-        if not figi:
-            await message.answer(f"Тикер {ticker} не поддерживается. Попробуйте SBER.ME или GAZP.ME.")
+        # Находим акцию в базе
+        stock_result = await session.execute(
+            select(Stock).where(Stock.ticker == ticker)
+        )
+        stock = stock_result.scalars().first()
+        if not stock:
+            await message.answer(f"Акция {ticker} не найдена в базе.")
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
+            # Проверяем наличие FIGI
+            figi = stock.figi
+            if not figi:
+                logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
+                figi = await update_figi(client, stock, session)
+                if not figi:
+                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.")
+                    return
+
             # Получаем свечи за последние 30 дней
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=30)

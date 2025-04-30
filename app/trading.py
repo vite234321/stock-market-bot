@@ -4,24 +4,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models import Stock, Subscription, TradeHistory, User
 from datetime import datetime, timedelta
-from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval
+from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType
 from aiogram import Bot
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Маппинг ticker -> FIGI
-TICKER_TO_FIGI = {
-    "SBER.ME": "BBG004730N88",
-    "GAZP.ME": "BBG004730RP0",
-    # Добавьте другие тикеры и их FIGI
-}
-
 class TradingBot:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.status = "Ожидание"
+
+    async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession):
+        """Обновляет FIGI для акции через Tinkoff API, если его нет в базе."""
+        try:
+            response = await client.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code="TQBR",  # Код рынка для акций MOEX
+                id=stock.ticker
+            )
+            stock.figi = response.instrument.figi
+            session.add(stock)
+            await session.commit()
+            logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
+            return stock.figi
+        except Exception as e:
+            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+            return None
 
     async def analyze_and_trade(self, session: AsyncSession, user_id: int):
         logger.info(f"Запуск анализа и торговли для пользователя {user_id}")
@@ -74,20 +84,30 @@ class TradingBot:
                 await self.bot.send_message(user_id, "🔍 Бот ищет возможности для торговли...")
 
                 for stock in all_stocks:
-                    figi = TICKER_TO_FIGI.get(stock.ticker)
+                    # Проверяем наличие FIGI в базе
+                    figi = stock.figi
                     if not figi:
-                        logger.warning(f"FIGI для {stock.ticker} не найден")
-                        continue
+                        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пытаемся обновить...")
+                        figi = await self.update_figi(client, stock, session)
+                        if not figi:
+                            logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
+                            continue
 
                     # Получаем свечи за последние 30 дней для анализа тренда
                     end_date = datetime.utcnow()
                     start_date = end_date - timedelta(days=30)
-                    candles = await client.market_data.get_candles(
-                        figi=figi,
-                        from_=start_date,
-                        to=end_date,
-                        interval=CandleInterval.CANDLE_INTERVAL_DAY
-                    )
+                    logger.info(f"Запрашиваем свечи для {stock.ticker} (FIGI: {figi})")
+                    try:
+                        candles = await client.market_data.get_candles(
+                            figi=figi,
+                            from_=start_date,
+                            to=end_date,
+                            interval=CandleInterval.CANDLE_INTERVAL_DAY
+                        )
+                        logger.info(f"Получено {len(candles.candles)} свечей для {stock.ticker}")
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении свечей для {stock.ticker}: {e}")
+                        continue
 
                     if not candles.candles:
                         logger.warning(f"Нет данных о свечах для {stock.ticker}")
