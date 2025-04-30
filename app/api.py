@@ -75,7 +75,6 @@ async def update_figi_for_all_stocks():
     logger.info("Запуск обновления FIGI для всех акций")
     async with async_session() as session:
         try:
-            # Получаем первого пользователя с токеном для запросов к API
             user_result = await session.execute(
                 select(User).where(User.tinkoff_token != None).limit(1)
             )
@@ -93,11 +92,15 @@ async def update_figi_for_all_stocks():
                     logger.info("Все акции уже имеют FIGI")
                     return
 
-                # Обрабатываем акции пакетами по 10 с задержкой между пакетами
                 batch_size = 10
                 for i in range(0, len(stocks), batch_size):
                     batch = stocks[i:i + batch_size]
                     for stock in batch:
+                        # Исправляем тикер, убирая .ME
+                        original_ticker = stock.ticker
+                        stock.ticker = stock.ticker.replace('.ME', '')
+                        logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
+                        session.add(stock)
                         try:
                             response = await client.instruments.share_by(
                                 id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
@@ -107,12 +110,14 @@ async def update_figi_for_all_stocks():
                             stock.figi = response.instrument.figi
                             session.add(stock)
                             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
-                        except InvestError as e:  # Заменяем TinkoffInvestError на InvestError
-                            if "RESOURCE_EXHAUSTED" in str(e):
+                        except InvestError as e:
+                            if "NOT_FOUND" in str(e):
+                                logger.error(f"Инструмент {stock.ticker} не найден в API")
+                                continue
+                            elif "RESOURCE_EXHAUSTED" in str(e):
                                 reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
                                 logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
                                 await asyncio.sleep(reset_time)
-                                # Повторяем запрос после ожидания
                                 response = await client.instruments.share_by(
                                     id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
                                     class_code="TQBR",
@@ -127,10 +132,8 @@ async def update_figi_for_all_stocks():
                         except Exception as e:
                             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
                             continue
-                        # Задержка между запросами в пакете
-                        await asyncio.sleep(0.5)  # 0.5 секунды между запросами
-                    # Задержка между пакетами
-                    await asyncio.sleep(5)  # 5 секунд между пакетами
+                        await asyncio.sleep(0.5)
+                    await asyncio.sleep(5)
                 await session.commit()
                 logger.info("Обновление FIGI завершено")
         except Exception as e:

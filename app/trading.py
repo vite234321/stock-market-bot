@@ -6,7 +6,7 @@ from sqlalchemy import select
 from app.models import Stock, Subscription, TradeHistory, User
 from datetime import datetime, timedelta
 from tinkoff.invest import AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType
-from tinkoff.invest.exceptions import InvestError  # Заменяем TinkoffInvestError на InvestError
+from tinkoff.invest.exceptions import InvestError
 from aiogram import Bot
 
 # Configure logging
@@ -18,12 +18,30 @@ class TradingBot:
         self.bot = bot
         self.status = "Ожидание"
 
+    async def debug_available_shares(self, client: AsyncClient):
+        """Отладочная функция для вывода доступных акций."""
+        try:
+            response = await client.instruments.shares()
+            for instrument in response.instruments:
+                if instrument.class_code == "TQBR":
+                    logger.info(f"Доступный тикер: {instrument.ticker}, FIGI: {instrument.figi}, Название: {instrument.name}")
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка акций: {e}")
+
     async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession):
         """Обновляет FIGI для акции через Tinkoff API, если его нет в базе."""
         try:
+            # Исправляем тикер, убирая .ME
+            original_ticker = stock.ticker
+            stock.ticker = stock.ticker.replace('.ME', '')
+            if original_ticker != stock.ticker:
+                logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
+                session.add(stock)
+                await session.commit()
+
             response = await client.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code="TQBR",  # Код рынка для акций MOEX
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,  # Исправлено
+                class_code="TQBR",
                 id=stock.ticker
             )
             stock.figi = response.instrument.figi
@@ -31,14 +49,16 @@ class TradingBot:
             await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
-        except InvestError as e:  # Заменяем TinkoffInvestError на InvestError
-            if "RESOURCE_EXHAUSTED" in str(e):
+        except InvestError as e:
+            if "NOT_FOUND" in str(e):
+                logger.error(f"Инструмент {stock.ticker} не найден в API")
+                return None
+            elif "RESOURCE_EXHAUSTED" in str(e):
                 reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
                 logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
                 await asyncio.sleep(reset_time)
-                # Повторяем запрос после ожидания
                 response = await client.instruments.share_by(
-                    id_type=InstrumentIdType.INSTRUMENTITATION_ID_TYPE_TICKER,
+                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,  # Исправлено
                     class_code="TQBR",
                     id=stock.ticker
                 )
@@ -60,7 +80,6 @@ class TradingBot:
         logger.info(f"Статус бота для пользователя {user_id}: {self.status}")
 
         try:
-            # Получаем токен пользователя
             user_result = await session.execute(
                 select(User).where(User.user_id == user_id)
             )
@@ -72,7 +91,9 @@ class TradingBot:
                 return
 
             async with AsyncClient(user.tinkoff_token) as client:
-                # Получаем информацию о счёте
+                # Добавляем отладочный вызов для проверки доступных акций
+                await self.debug_available_shares(client)
+
                 accounts = await client.users.get_accounts()
                 if not accounts.accounts:
                     logger.error(f"Счета не найдены для пользователя {user_id}")
@@ -81,16 +102,13 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
-                # Получаем баланс
                 portfolio = await client.operations.get_portfolio(account_id=account_id)
                 total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
                 logger.info(f"Баланс пользователя {user_id}: {total_balance} RUB")
 
-                # Получаем позиции
                 positions = await client.operations.get_positions(account_id=account_id)
                 holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                # Получаем все акции для анализа
                 all_stocks_result = await session.execute(select(Stock))
                 all_stocks = all_stocks_result.scalars().all()
 
@@ -105,7 +123,6 @@ class TradingBot:
                 await self.bot.send_message(user_id, "🔍 Бот ищет возможности для торговли...")
 
                 for stock in all_stocks:
-                    # Проверяем наличие FIGI в базе
                     figi = stock.figi
                     if not figi:
                         logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пытаемся обновить...")
@@ -114,7 +131,6 @@ class TradingBot:
                             logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
                             continue
 
-                    # Получаем свечи за последние 30 дней для анализа тренда
                     end_date = datetime.utcnow()
                     start_date = end_date - timedelta(days=30)
                     logger.info(f"Запрашиваем свечи для {stock.ticker} (FIGI: {figi})")
@@ -139,12 +155,10 @@ class TradingBot:
                         logger.warning(f"Недостаточно данных для анализа {stock.ticker}")
                         continue
 
-                    # Рассчитываем скользящее среднее (SMA) за 5 дней
                     sma = sum(prices[-5:]) / 5
                     current_price = stock.last_price
                     volume = stock.volume if stock.volume else 0
 
-                    # Улучшенная стратегия: покупаем, если цена ниже SMA и есть восходящий тренд
                     trend_up = prices[-1] > prices[-2] > prices[-3]
                     if current_price < sma and trend_up and volume > 10000:
                         quantity = min(int(total_balance // current_price), 10)
@@ -173,7 +187,6 @@ class TradingBot:
                                 session.add(trade)
                                 await session.commit()
 
-                    # Продажа: если цена выше SMA на 10% и есть нисходящий тренд
                     trend_down = prices[-1] < prices[-2] < prices[-3]
                     if current_price > sma * 1.10 and trend_down:
                         available_to_sell = holdings.get(figi, 0)
@@ -202,8 +215,7 @@ class TradingBot:
                             session.add(trade)
                             await session.commit()
 
-                    # Добавляем небольшую задержку между акциями, чтобы не превысить лимиты API
-                    await asyncio.sleep(0.5)  # Задержка 0.5 секунды между запросами
+                    await asyncio.sleep(0.5)
 
                 self.status = "Ожидание следующего цикла"
                 logger.info(f"Статус бота для пользователя {user_id}: {self.status}")
