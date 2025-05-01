@@ -55,7 +55,7 @@ async def update_figi_for_all_stocks():
             async with AsyncClient(user.tinkoff_token) as client:
                 # Обновляем акции со статусом PENDING или FAILED
                 stocks_result = await session.execute(
-                    select(Stock).where(Stock.figi_status.in_([FigiStatus.PENDING, FigiStatus.FAILED]))
+                    select(Stock).where(Stock.figi_status.in_([FigiStatus.PENDING.value, FigiStatus.FAILED.value]))
                 )
                 stocks = stocks_result.scalars().all()
                 if not stocks:
@@ -77,13 +77,13 @@ async def update_figi_for_all_stocks():
                                 id=stock.ticker
                             )
                             stock.figi = response.instrument.figi
-                            stock.figi_status = FigiStatus.SUCCESS
+                            stock.set_figi_status(FigiStatus.SUCCESS)
                             session.add(stock)
                             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
                         except InvestError as e:
                             if "NOT_FOUND" in str(e):
                                 logger.error(f"Инструмент {stock.ticker} не найден в API")
-                                stock.figi_status = FigiStatus.FAILED
+                                stock.set_figi_status(FigiStatus.FAILED)
                                 session.add(stock)
                                 continue
                             elif "RESOURCE_EXHAUSTED" in str(e):
@@ -96,17 +96,17 @@ async def update_figi_for_all_stocks():
                                     id=stock.ticker
                                 )
                                 stock.figi = response.instrument.figi
-                                stock.figi_status = FigiStatus.SUCCESS
+                                stock.set_figi_status(FigiStatus.SUCCESS)
                                 session.add(stock)
                                 logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
                             else:
                                 logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                                stock.figi_status = FigiStatus.FAILED
+                                stock.set_figi_status(FigiStatus.FAILED)
                                 session.add(stock)
                                 continue
                         except Exception as e:
                             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                            stock.figi_status = FigiStatus.FAILED
+                            stock.set_figi_status(FigiStatus.FAILED)
                             session.add(stock)
                             continue
                         await asyncio.sleep(0.5)

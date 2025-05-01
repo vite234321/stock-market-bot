@@ -1,5 +1,5 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, Enum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
@@ -8,11 +8,11 @@ import enum
 class Base(AsyncAttrs, DeclarativeBase):
     pass
 
-# Статусы для FIGI
+# Константы для FIGI статуса (используем в коде для проверки)
 class FigiStatus(enum.Enum):
-    PENDING = "PENDING"  # Ожидает обновления
-    SUCCESS = "SUCCESS"  # FIGI успешно обновлён
-    FAILED = "FAILED"    # Не удалось обновить FIGI
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
 
 class Stock(Base):
     __tablename__ = "stocks"
@@ -24,7 +24,13 @@ class Stock(Base):
     volume = Column(Float)
     updated_at = Column(DateTime, default=datetime.utcnow)
     figi = Column(String, nullable=True)
-    figi_status = Column(Enum(FigiStatus), default=FigiStatus.PENDING)
+    figi_status = Column(String, default=FigiStatus.PENDING.value)  # Изменено на String
+
+    # Метод для проверки корректности значения figi_status
+    def set_figi_status(self, status: FigiStatus):
+        if status not in FigiStatus:
+            raise ValueError(f"Недопустимое значение figi_status: {status}. Допустимые значения: {[e.value for e in FigiStatus]}")
+        self.figi_status = status.value
 
 class User(Base):
     __tablename__ = "users"
@@ -60,6 +66,6 @@ class Signal(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     ticker = Column(String, index=True)
-    signal_type = Column(String)  # Например, "buy" или "sell"
-    value = Column(Float, nullable=True)  # Значение сигнала, если применимо
+    signal_type = Column(String)
+    value = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

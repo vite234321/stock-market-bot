@@ -61,16 +61,16 @@ class TradingBot:
                 return None
 
             stock.figi = response.instrument.figi
-            stock.figi_status = FigiStatus.SUCCESS
+            stock.set_figi_status(FigiStatus.SUCCESS)  # Используем метод для установки значения
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-            stock.figi_status = FigiStatus.FAILED
+            stock.set_figi_status(FigiStatus.FAILED)
             return None
         except Exception as e:
             logger.error(f"Неожиданная ошибка при обновлении FIGI для {stock.ticker}: {e}")
-            stock.figi_status = FigiStatus.FAILED
+            stock.set_figi_status(FigiStatus.FAILED)
             return None
 
     async def fetch_news(self, ticker: str) -> List[Dict]:
@@ -100,7 +100,6 @@ class TradingBot:
                 articles = response.json().get("articles", [])
                 self.news_cache[cleaned_ticker] = articles
                 logger.info(f"Получено {len(articles)} новостей для {cleaned_ticker}")
-                # Ограничим размер кэша новостей
                 if len(self.news_cache) > 50:
                     oldest_ticker = next(iter(self.news_cache))
                     del self.news_cache[oldest_ticker]
@@ -399,7 +398,7 @@ class TradingBot:
 
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
-                        select(Stock).where(Stock.figi_status != FigiStatus.FAILED)
+                        select(Stock).where(Stock.figi_status != 'FAILED')  # Сравниваем со строкой
                     )
                     all_stocks = all_stocks_result.scalars().all()
 
@@ -419,14 +418,14 @@ class TradingBot:
                             async with async_session() as session:
                                 stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
                                 stock_to_update = stock_result.scalars().first()
-                                stock_to_update.figi_status = FigiStatus.FAILED
+                                stock_to_update.set_figi_status(FigiStatus.FAILED)
                                 await session.commit()
                             continue
                         async with async_session() as session:
                             stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
                             stock_to_update = stock_result.scalars().first()
                             stock_to_update.figi = figi
-                            stock_to_update.figi_status = FigiStatus.SUCCESS
+                            stock_to_update.set_figi_status(FigiStatus.SUCCESS)
                             await session.commit()
 
                     figis_to_subscribe.append(figi)
@@ -475,7 +474,7 @@ class TradingBot:
                         if ticker not in self.historical_data:
                             self.historical_data[ticker] = []
                         self.historical_data[ticker].append(candle_data)
-                        if len(self.historical_data[ticker]) > 50:  # Уменьшаем лимит до 50 для оптимизации памяти
+                        if len(self.historical_data[ticker]) > 50:
                             self.historical_data[ticker] = self.historical_data[ticker][-50:]
                             logger.info(f"Ограничен размер исторических данных для {ticker} до 50 свечей")
 
