@@ -61,7 +61,7 @@ class TradingBot:
                 return None
 
             stock.figi = response.instrument.figi
-            stock.set_figi_status(FigiStatus.SUCCESS)  # Используем метод для установки значения
+            stock.set_figi_status(FigiStatus.SUCCESS)
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
@@ -215,9 +215,14 @@ class TradingBot:
 
     async def train_ml_model(self, ticker: str, client: AsyncClient, figi: str):
         """Обучает модель ML для предсказания цены."""
-        if ticker in self.historical_data and len(self.historical_data[ticker]) >= 60:
-            prices = [c["close"] for c in self.historical_data[ticker]]
+        required_candles = 60  # Минимальное количество свечей для обучения
+        prices = []
+
+        # Проверяем, достаточно ли данных в historical_data
+        if ticker in self.historical_data and len(self.historical_data[ticker]) >= required_candles:
+            prices = [c["close"] for c in self.historical_data[ticker][-required_candles:]]
         else:
+            # Загружаем дополнительные данные через API Tinkoff
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=90)
             try:
@@ -236,8 +241,8 @@ class TradingBot:
                 logger.error(f"Ошибка при получении свечей для {ticker}: {e}")
                 return
 
-        if len(prices) < 60:
-            logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}: {len(prices)} свечей")
+        if len(prices) < required_candles:
+            logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}: {len(prices)} свечей, требуется {required_candles}")
             return
 
         X = []
@@ -398,7 +403,7 @@ class TradingBot:
 
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
-                        select(Stock).where(Stock.figi_status != 'FAILED')  # Сравниваем со строкой
+                        select(Stock).where(Stock.figi_status != 'FAILED')
                     )
                     all_stocks = all_stocks_result.scalars().all()
 
@@ -474,9 +479,9 @@ class TradingBot:
                         if ticker not in self.historical_data:
                             self.historical_data[ticker] = []
                         self.historical_data[ticker].append(candle_data)
-                        if len(self.historical_data[ticker]) > 50:
-                            self.historical_data[ticker] = self.historical_data[ticker][-50:]
-                            logger.info(f"Ограничен размер исторических данных для {ticker} до 50 свечей")
+                        if len(self.historical_data[ticker]) > 100:  # Увеличен лимит до 100
+                            self.historical_data[ticker] = self.historical_data[ticker][-100:]
+                            logger.info(f"Ограничен размер исторических данных для {ticker} до 100 свечей")
 
                         news = await self.fetch_news(ticker)
                         if self.is_negative_news(news):
@@ -499,7 +504,7 @@ class TradingBot:
 
                         required_length = 35
                         if len(prices) < required_length:
-                            logger.warning(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}")
+                            logger.info(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}. Ожидаем накопления данных...")
                             continue
 
                         rsi = self.calculate_rsi(prices)
