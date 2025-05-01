@@ -17,7 +17,6 @@ import logging
 import os
 import asyncio
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -123,7 +122,8 @@ async def start_streaming_for_users():
                 return
             for user in users:
                 logger.info(f"Запуск стриминга для пользователя {user.user_id}")
-                asyncio.create_task(trading_bot.stream_and_trade(session, user.user_id))
+                task = asyncio.create_task(trading_bot.stream_and_trade(session, user.user_id))
+                trading_bot.stream_task = task
         except Exception as e:
             logger.error(f"Ошибка при запуске стриминга: {e}")
 
@@ -156,12 +156,9 @@ async def on_startup():
     logger.info("Запуск polling на Heroku")
     asyncio.create_task(dp.start_polling(bot))
     
-    # Запускаем стриминг
     await start_streaming_for_users()
     
-    # Запускаем обновление FIGI каждый час
     scheduler.add_job(update_figi_for_all_stocks, "interval", hours=1)
-    # Запускаем ежедневный отчёт в 22:00
     scheduler.add_job(send_daily_reports, "cron", hour=22, minute=0)
     scheduler.start()
     logger.info("Планировщик запущен")
@@ -173,6 +170,7 @@ async def on_shutdown():
     scheduler.shutdown()
     await dp.stop_polling()
     await bot.session.close()
+    await asyncio.sleep(1)
 
 @app.post("/signals")
 async def receive_signal(signal: dict):
