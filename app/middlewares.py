@@ -4,9 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Callable, Dict, Any, Awaitable
 
 class DbSessionMiddleware(BaseMiddleware):
-    def __init__(self, session_factory):
+    def __init__(self, session_factory, trading_bot):
         super().__init__()
         self.session_factory = session_factory
+        self.trading_bot = trading_bot
 
     async def __call__(
         self,
@@ -16,6 +17,7 @@ class DbSessionMiddleware(BaseMiddleware):
     ) -> Any:
         async with self.session_factory() as session:
             data["session"] = session
+            data["trading_bot"] = self.trading_bot  # Передаём trading_bot в data
             try:
                 result = await handler(event, data)
                 await session.commit()

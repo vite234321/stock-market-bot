@@ -403,7 +403,7 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "enable_autotrading")
-async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSession, trading_bot):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} включил автоторговлю")
     try:
@@ -414,18 +414,30 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.")
             return
 
+        if user.autotrading_enabled:
+            await callback_query.message.answer("⚠️ Автоторговля уже включена!", reply_markup=get_autotrading_menu())
+            return
+
         user.autotrading_enabled = True
         await session.commit()
+
+        # Останавливаем существующий стрим, если он есть
+        trading_bot.stop_streaming(user_id)
+
+        # Запускаем новый стрим
+        task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
+        trading_bot.stream_tasks[user_id] = task
+
         await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
         # Отправляем уведомление
-        await bot.send_message(user_id, "🤖 Бот начал анализ рынка и поиск возможностей для торговли.")
+        await callback_query.message.answer("🤖 Бот начал анализ рынка и поиск возможностей для торговли.")
     except Exception as e:
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при включении автоторговли.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "disable_autotrading")
-async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession, bot: Bot):
+async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSession, trading_bot):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} выключил автоторговлю")
     try:
@@ -438,9 +450,13 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
 
         user.autotrading_enabled = False
         await session.commit()
+
+        # Останавливаем стрим для пользователя
+        trading_bot.stop_streaming(user_id)
+
         await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
         # Отправляем уведомление
-        await bot.send_message(user_id, "🤖 Бот прекратил торговлю.")
+        await callback_query.message.answer("🤖 Бот прекратил торговлю.")
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")
@@ -658,4 +674,4 @@ async def cmd_signals(message: Message, session: AsyncSession):
         await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении сигналов для {ticker}: {e}")
-        await message.answer(f"Ошибка при получении сигналов для {ticker}.")
+        await message.answer(f"Ошибка при получении{ticker}: {e}")

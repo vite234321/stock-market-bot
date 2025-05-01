@@ -31,7 +31,7 @@ class TradingBot:
         self.news_cache: Dict[str, List[Dict]] = {}
         self.historical_data: Dict[str, List] = {}
         self.running = False
-        self.stream_task = None
+        self.stream_tasks: Dict[int, asyncio.Task] = {}  # Храним задачи по user_id
 
     async def debug_available_shares(self, client: AsyncClient):
         """Отладочная функция для вывода доступных акций."""
@@ -625,13 +625,21 @@ class TradingBot:
             await self.bot.send_message(user_id, f"❌ Ошибка автоторговли: {error_message}")
             raise
 
-    def stop_streaming(self):
-        """Останавливает стриминг."""
+    def stop_streaming(self, user_id: int = None):
+        """Останавливает стриминг для конкретного пользователя или всех."""
         self.running = False
         self.status = "Остановлен"
-        if self.stream_task:
-            self.stream_task.cancel()
-            self.stream_task = None
+        if user_id:
+            if user_id in self.stream_tasks:
+                task = self.stream_tasks[user_id]
+                task.cancel()
+                del self.stream_tasks[user_id]
+                logger.info(f"Стриминг остановлен для пользователя {user_id}")
+        else:
+            for user_id, task in list(self.stream_tasks.items()):
+                task.cancel()
+                del self.stream_tasks[user_id]
+            logger.info("Стриминг остановлен для всех пользователей")
 
     def get_status(self):
         return self.status

@@ -35,9 +35,10 @@ bot = Bot(
 
 dp = Dispatcher()
 dp.include_router(router)
-dp.update.middleware(DbSessionMiddleware(async_session))
-
+# Передаём trading_bot в middleware
 trading_bot = TradingBot(bot)
+dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
+
 scheduler = AsyncIOScheduler()
 
 async def update_figi_for_all_stocks():
