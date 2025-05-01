@@ -24,7 +24,7 @@ class Stock(Base):
     volume = Column(Float)
     updated_at = Column(DateTime, default=datetime.utcnow)
     figi = Column(String, nullable=True)
-    figi_status = Column(Enum(FigiStatus), default=FigiStatus.PENDING)  # Новый столбец
+    figi_status = Column(Enum(FigiStatus), default=FigiStatus.PENDING)
 
 class User(Base):
     __tablename__ = "users"
@@ -53,4 +53,13 @@ class TradeHistory(Base):
     price = Column(Float)
     quantity = Column(Integer)
     total = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Signal(Base):
+    __tablename__ = "signals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, index=True)
+    signal_type = Column(String)  # Например, "buy" или "sell"
+    value = Column(Float, nullable=True)  # Значение сигнала, если применимо
     created_at = Column(DateTime, default=datetime.utcnow)

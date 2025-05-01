@@ -61,7 +61,7 @@ class TradingBot:
                 return None
 
             stock.figi = response.instrument.figi
-            stock.figi_status = FigiStatus.SUCCESS  # Обновляем статус
+            stock.figi_status = FigiStatus.SUCCESS
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
@@ -100,6 +100,11 @@ class TradingBot:
                 articles = response.json().get("articles", [])
                 self.news_cache[cleaned_ticker] = articles
                 logger.info(f"Получено {len(articles)} новостей для {cleaned_ticker}")
+                # Ограничим размер кэша новостей
+                if len(self.news_cache) > 50:
+                    oldest_ticker = next(iter(self.news_cache))
+                    del self.news_cache[oldest_ticker]
+                    logger.info(f"Удалён кэш новостей для {oldest_ticker} для оптимизации памяти")
                 return articles
         except Exception as e:
             logger.error(f"Ошибка при получении новостей для {ticker}: {e}")
@@ -173,7 +178,6 @@ class TradingBot:
             logger.warning(f"Недостаточно данных для сигнальной линии MACD: {len(signal)} элементов, требуется {signal_period}")
             return None, None, None
 
-        # Проверяем, что индексы находятся в допустимом диапазоне
         signal_idx = len(signal) - 1
         macd_idx = len(macd) - 1
         if signal_idx < 0 or macd_idx < signal_period - 1:
@@ -395,7 +399,7 @@ class TradingBot:
 
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
-                        select(Stock).where(Stock.figi_status != FigiStatus.FAILED)  # Исключаем акции с неудачным FIGI
+                        select(Stock).where(Stock.figi_status != FigiStatus.FAILED)
                     )
                     all_stocks = all_stocks_result.scalars().all()
 
@@ -471,8 +475,9 @@ class TradingBot:
                         if ticker not in self.historical_data:
                             self.historical_data[ticker] = []
                         self.historical_data[ticker].append(candle_data)
-                        if len(self.historical_data[ticker]) > 100:
-                            self.historical_data[ticker] = self.historical_data[ticker][-100:]
+                        if len(self.historical_data[ticker]) > 50:  # Уменьшаем лимит до 50 для оптимизации памяти
+                            self.historical_data[ticker] = self.historical_data[ticker][-50:]
+                            logger.info(f"Ограничен размер исторических данных для {ticker} до 50 свечей")
 
                         news = await self.fetch_news(ticker)
                         if self.is_negative_news(news):
