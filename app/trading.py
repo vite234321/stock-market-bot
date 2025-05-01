@@ -400,6 +400,7 @@ class TradingBot:
                     await self.bot.send_message(user_id, "❌ Счёт не найден. Проверьте токен T-Invest API.")
                     return
                 account_id = accounts.accounts[0].id
+
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
                         select(Stock).where(Stock.figi_status != 'FAILED')
@@ -450,8 +451,13 @@ class TradingBot:
                 self.status = "Подписка на свечи"
                 subscribe_request = SubscribeCandlesRequest(
                     subscription_action=SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE,
-                    instruments=[{"figi": figi} for figi in figis_to_subscribe],
-                    interval=SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE  # Исправлено: subscription_interval -> interval
+                    instruments=[
+                        {
+                            "figi": figi,
+                            "interval": SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE
+                        }
+                        for figi in figis_to_subscribe
+                    ]
                 )
                 async for candle in client.market_data_stream.market_data_stream(subscribe_request):
                     if not self.running:
