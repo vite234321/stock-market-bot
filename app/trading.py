@@ -3,8 +3,8 @@ import logging
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.models import Stock, Subscription, TradeHistory, User
-from app.database import async_session  # Импортируем async_session
+from app.models import Stock, Subscription, TradeHistory, User, FigiStatus
+from app.database import async_session
 from datetime import datetime, timedelta
 from tinkoff.invest import (
     AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType,
@@ -43,11 +43,12 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
-    async def update_figi(self, client: AsyncClient, stock: Stock):
+    async def update_figi(self, client: AsyncClient, stock: Stock) -> Optional[str]:
         """Проверяет наличие FIGI в базе. Если его нет, пытается обновить."""
         if stock.figi:
             return stock.figi
-        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пытаемся обновить...")
+
+        logger.info(f"Обновление FIGI для {stock.ticker}...")
         try:
             cleaned_ticker = stock.ticker.replace(".ME", "")
             response = await client.instruments.share_by(
@@ -55,11 +56,21 @@ class TradingBot:
                 class_code="TQBR",
                 id=cleaned_ticker
             )
+            if not hasattr(response, 'instrument') or not response.instrument.figi:
+                logger.error(f"API Tinkoff не вернул FIGI для {stock.ticker}")
+                return None
+
             stock.figi = response.instrument.figi
+            stock.figi_status = FigiStatus.SUCCESS  # Обновляем статус
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+            stock.figi_status = FigiStatus.FAILED
+            return None
+        except Exception as e:
+            logger.error(f"Неожиданная ошибка при обновлении FIGI для {stock.ticker}: {e}")
+            stock.figi_status = FigiStatus.FAILED
             return None
 
     async def fetch_news(self, ticker: str) -> List[Dict]:
@@ -110,6 +121,7 @@ class TradingBot:
     def calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
         """Рассчитывает RSI (Relative Strength Index)."""
         if len(prices) < period + 1:
+            logger.warning(f"Недостаточно данных для расчёта RSI: {len(prices)} элементов, требуется {period + 1}")
             return None
         gains = []
         losses = []
@@ -131,9 +143,14 @@ class TradingBot:
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
         """Рассчитывает MACD и сигнальную линию."""
-        if len(prices) < slow_period + signal_period:
+        required_length = slow_period + signal_period
+        if len(prices) < required_length:
+            logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices)} элементов, требуется {required_length}")
             return None, None, None
+
         def ema(data, period):
+            if len(data) < period:
+                return []
             ema_values = []
             k = 2 / (period + 1)
             ema_values.append(sum(data[:period]) / period)
@@ -144,14 +161,32 @@ class TradingBot:
 
         ema_fast = ema(prices, fast_period)
         ema_slow = ema(prices, slow_period)
+
+        if len(ema_fast) < slow_period or len(ema_slow) < slow_period:
+            logger.warning(f"Недостаточно данных для EMA: ema_fast={len(ema_fast)}, ema_slow={len(ema_slow)}")
+            return None, None, None
+
         macd = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
         signal = ema(macd, signal_period)
-        histogram = [macd[i + signal_period - 1] - signal[i] for i in range(len(signal))]
-        return macd[-1], signal[-1], histogram[-1]
+
+        if len(signal) < signal_period:
+            logger.warning(f"Недостаточно данных для сигнальной линии MACD: {len(signal)} элементов, требуется {signal_period}")
+            return None, None, None
+
+        # Проверяем, что индексы находятся в допустимом диапазоне
+        signal_idx = len(signal) - 1
+        macd_idx = len(macd) - 1
+        if signal_idx < 0 or macd_idx < signal_period - 1:
+            logger.warning(f"Недостаточно данных для расчёта гистограммы MACD: signal_idx={signal_idx}, macd_idx={macd_idx}")
+            return None, None, None
+
+        histogram = macd[macd_idx] - signal[signal_idx]
+        return macd[macd_idx], signal[signal_idx], histogram
 
     def calculate_atr(self, candles: List, period: int = 14) -> Optional[float]:
         """Рассчитывает ATR (Average True Range)."""
         if len(candles) < period + 1:
+            logger.warning(f"Недостаточно данных для расчёта ATR: {len(candles)} элементов, требуется {period + 1}")
             return None
         tr_values = []
         for i in range(1, len(candles)):
@@ -166,6 +201,7 @@ class TradingBot:
     def calculate_bollinger_bands(self, prices: List[float], period: int = 20, std_dev: float = 2) -> tuple:
         """Рассчитывает Bollinger Bands."""
         if len(prices) < period:
+            logger.warning(f"Недостаточно данных для расчёта Bollinger Bands: {len(prices)} элементов, требуется {period}")
             return None, None, None
         sma = sum(prices[-period:]) / period
         variance = sum((p - sma) ** 2 for p in prices[-period:]) / period
@@ -181,17 +217,24 @@ class TradingBot:
         else:
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=90)
-            candles = await client.market_data.get_candles(
-                figi=figi,
-                from_=start_date,
-                to=end_date,
-                interval=CandleInterval.CANDLE_INTERVAL_DAY
-            )
-            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-            self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles.candles)]
+            try:
+                candles = await client.market_data.get_candles(
+                    figi=figi,
+                    from_=start_date,
+                    to=end_date,
+                    interval=CandleInterval.CANDLE_INTERVAL_DAY
+                )
+                if not candles.candles:
+                    logger.warning(f"Не удалось получить свечи для {ticker}")
+                    return
+                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+                self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles.candles)]
+            except Exception as e:
+                logger.error(f"Ошибка при получении свечей для {ticker}: {e}")
+                return
 
         if len(prices) < 60:
-            logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}")
+            logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}: {len(prices)} свечей")
             return
 
         X = []
@@ -207,7 +250,7 @@ class TradingBot:
             y.append(prices[i+1])
 
         if len(X) < 10:
-            logger.warning(f"Недостаточно данных для обучения ML после расчёта индикаторов для {ticker}")
+            logger.warning(f"Недостаточно данных для обучения ML после расчёта индикаторов для {ticker}: {len(X)} точек")
             return
 
         model = LinearRegression()
@@ -218,11 +261,13 @@ class TradingBot:
     def predict_price(self, ticker: str, prices: List[float]) -> Optional[float]:
         """Предсказывает следующую цену с помощью ML модели."""
         if ticker not in self.ml_models or len(prices) < 30:
+            logger.warning(f"Недостаточно данных для предсказания цены для {ticker}: {len(prices)} элементов")
             return None
         window = prices[-30:]
         rsi = self.calculate_rsi(window)
         macd, signal, _ = self.calculate_macd(window)
         if rsi is None or macd is None:
+            logger.warning(f"Не удалось рассчитать индикаторы для предсказания цены для {ticker}")
             return None
         features = np.array([[window[-1], rsi, macd - signal]])
         predicted_price = self.ml_models[ticker].predict(features)[0]
@@ -232,14 +277,20 @@ class TradingBot:
         """Тестирует стратегию на исторических данных."""
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=180)
-        candles = await client.market_data.get_candles(
-            figi=figi,
-            from_=start_date,
-            to=end_date,
-            interval=CandleInterval.CANDLE_INTERVAL_DAY
-        )
-        prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+        try:
+            candles = await client.market_data.get_candles(
+                figi=figi,
+                from_=start_date,
+                to=end_date,
+                interval=CandleInterval.CANDLE_INTERVAL_DAY
+            )
+            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+        except Exception as e:
+            logger.error(f"Ошибка при получении свечей для бэктестинга {ticker}: {e}")
+            return {"profit": 0, "trades": 0}
+
         if len(prices) < 60:
+            logger.warning(f"Недостаточно данных для бэктестинга {ticker}: {len(prices)} свечей")
             return {"profit": 0, "trades": 0}
 
         balance = 100000
@@ -320,7 +371,6 @@ class TradingBot:
         self.running = True
 
         try:
-            # Создаём новую сессию для проверки пользователя
             async with async_session() as session:
                 user_result = await session.execute(
                     select(User).where(User.user_id == user_id)
@@ -343,9 +393,10 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
-                # Получаем список акций с новой сессией
                 async with async_session() as session:
-                    all_stocks_result = await session.execute(select(Stock))
+                    all_stocks_result = await session.execute(
+                        select(Stock).where(Stock.figi_status != FigiStatus.FAILED)  # Исключаем акции с неудачным FIGI
+                    )
                     all_stocks = all_stocks_result.scalars().all()
 
                 if not all_stocks:
@@ -361,13 +412,19 @@ class TradingBot:
                         figi = await self.update_figi(client, stock)
                         if not figi:
                             logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
+                            async with async_session() as session:
+                                stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
+                                stock_to_update = stock_result.scalars().first()
+                                stock_to_update.figi_status = FigiStatus.FAILED
+                                await session.commit()
                             continue
-                        # Обновляем FIGI в базе
                         async with async_session() as session:
                             stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
                             stock_to_update = stock_result.scalars().first()
                             stock_to_update.figi = figi
+                            stock_to_update.figi_status = FigiStatus.SUCCESS
                             await session.commit()
+
                     figis_to_subscribe.append(figi)
 
                     backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
@@ -395,7 +452,6 @@ class TradingBot:
                         break
 
                     figi = candle.candle.figi
-                    # Используем новую сессию для каждой итерации
                     async with async_session() as session:
                         stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
                         stock = stock_result.scalars().first()

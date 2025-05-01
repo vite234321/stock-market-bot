@@ -8,7 +8,7 @@ from app.handlers import router
 from app.middlewares import DbSessionMiddleware
 from app.database import init_db, async_session
 from app.trading import TradingBot
-from app.models import User, Stock
+from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tinkoff.invest import AsyncClient, InstrumentIdType
@@ -53,8 +53,9 @@ async def update_figi_for_all_stocks():
                 return
 
             async with AsyncClient(user.tinkoff_token) as client:
+                # Обновляем акции со статусом PENDING или FAILED
                 stocks_result = await session.execute(
-                    select(Stock).where(Stock.figi == None)
+                    select(Stock).where(Stock.figi_status.in_([FigiStatus.PENDING, FigiStatus.FAILED]))
                 )
                 stocks = stocks_result.scalars().all()
                 if not stocks:
@@ -76,11 +77,14 @@ async def update_figi_for_all_stocks():
                                 id=stock.ticker
                             )
                             stock.figi = response.instrument.figi
+                            stock.figi_status = FigiStatus.SUCCESS
                             session.add(stock)
                             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
                         except InvestError as e:
                             if "NOT_FOUND" in str(e):
                                 logger.error(f"Инструмент {stock.ticker} не найден в API")
+                                stock.figi_status = FigiStatus.FAILED
+                                session.add(stock)
                                 continue
                             elif "RESOURCE_EXHAUSTED" in str(e):
                                 reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
@@ -92,13 +96,18 @@ async def update_figi_for_all_stocks():
                                     id=stock.ticker
                                 )
                                 stock.figi = response.instrument.figi
+                                stock.figi_status = FigiStatus.SUCCESS
                                 session.add(stock)
                                 logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
                             else:
                                 logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+                                stock.figi_status = FigiStatus.FAILED
+                                session.add(stock)
                                 continue
                         except Exception as e:
                             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+                            stock.figi_status = FigiStatus.FAILED
+                            session.add(stock)
                             continue
                         await asyncio.sleep(0.5)
                     await asyncio.sleep(5)
@@ -122,7 +131,6 @@ async def start_streaming_for_users():
                 return
             for user in users:
                 logger.info(f"Запуск стриминга для пользователя {user.user_id}")
-                # Создаём задачу без передачи сессии
                 task = asyncio.create_task(trading_bot.stream_and_trade(user.user_id))
                 trading_bot.stream_task = task
         except Exception as e:
