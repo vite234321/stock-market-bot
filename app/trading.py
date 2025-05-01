@@ -399,7 +399,7 @@ class TradingBot:
                     self.status = "Ошибка: счёт не найден"
                     await self.bot.send_message(user_id, "❌ Счёт не найден. Проверьте токен T-Invest API.")
                     return
-                account_id = accounts.accounts[0].id')],
+                account_id = accounts.accounts[0].id
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
                         select(Stock).where(Stock.figi_status != 'FAILED')
