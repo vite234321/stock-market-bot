@@ -399,8 +399,7 @@ class TradingBot:
                     self.status = "Ошибка: счёт не найден"
                     await self.bot.send_message(user_id, "❌ Счёт не найден. Проверьте токен T-Invest API.")
                     return
-                account_id = accounts.accounts[0].id
-
+                account_id = accounts.accounts[0].id')],
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
                         select(Stock).where(Stock.figi_status != 'FAILED')
@@ -452,7 +451,7 @@ class TradingBot:
                 subscribe_request = SubscribeCandlesRequest(
                     subscription_action=SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE,
                     instruments=[{"figi": figi} for figi in figis_to_subscribe],
-                    subscription_interval=SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE
+                    interval=SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE  # Исправлено: subscription_interval -> interval
                 )
                 async for candle in client.market_data_stream.market_data_stream(subscribe_request):
                     if not self.running:
@@ -479,7 +478,7 @@ class TradingBot:
                         if ticker not in self.historical_data:
                             self.historical_data[ticker] = []
                         self.historical_data[ticker].append(candle_data)
-                        if len(self.historical_data[ticker]) > 100:  # Увеличен лимит до 100
+                        if len(self.historical_data[ticker]) > 100:
                             self.historical_data[ticker] = self.historical_data[ticker][-100:]
                             logger.info(f"Ограничен размер исторических данных для {ticker} до 100 свечей")
 
