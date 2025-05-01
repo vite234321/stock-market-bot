@@ -4,6 +4,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.models import Stock, Subscription, TradeHistory, User
+from app.database import async_session  # Импортируем async_session
 from datetime import datetime, timedelta
 from tinkoff.invest import (
     AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType,
@@ -30,7 +31,7 @@ class TradingBot:
         self.news_cache: Dict[str, List[Dict]] = {}
         self.historical_data: Dict[str, List] = {}
         self.running = False
-        self.stream_task = None  # Для хранения задачи стриминга
+        self.stream_task = None
 
     async def debug_available_shares(self, client: AsyncClient):
         """Отладочная функция для вывода доступных акций."""
@@ -42,7 +43,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
-    async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession):
+    async def update_figi(self, client: AsyncClient, stock: Stock):
         """Проверяет наличие FIGI в базе. Если его нет, пытается обновить."""
         if stock.figi:
             return stock.figi
@@ -55,8 +56,6 @@ class TradingBot:
                 id=cleaned_ticker
             )
             stock.figi = response.instrument.figi
-            session.add(stock)
-            await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
@@ -314,22 +313,24 @@ class TradingBot:
         )
         await self.bot.send_message(user_id, message, parse_mode="HTML")
 
-    async def stream_and_trade(self, session: AsyncSession, user_id: int):
+    async def stream_and_trade(self, user_id: int):
         """Запускает стриминг свечей и торгует в реальном времени."""
         logger.info(f"Запуск стриминга и торговли для пользователя {user_id}")
         self.status = "Запуск стриминга"
         self.running = True
 
         try:
-            user_result = await session.execute(
-                select(User).where(User.user_id == user_id)
-            )
-            user = user_result.scalars().first()
-            if not user or not user.tinkoff_token:
-                logger.error(f"Токен T-Invest API не найден для пользователя {user_id}")
-                self.status = "Ошибка: токен не найден"
-                await self.bot.send_message(user_id, "❌ Токен T-Invest API не найден. Установите его в меню настроек.")
-                return
+            # Создаём новую сессию для проверки пользователя
+            async with async_session() as session:
+                user_result = await session.execute(
+                    select(User).where(User.user_id == user_id)
+                )
+                user = user_result.scalars().first()
+                if not user or not user.tinkoff_token:
+                    logger.error(f"Токен T-Invest API не найден для пользователя {user_id}")
+                    self.status = "Ошибка: токен не найден"
+                    await self.bot.send_message(user_id, "❌ Токен T-Invest API не найден. Установите его в меню настроек.")
+                    return
 
             async with AsyncClient(user.tinkoff_token) as client:
                 await self.debug_available_shares(client)
@@ -342,8 +343,10 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
-                all_stocks_result = await session.execute(select(Stock))
-                all_stocks = all_stocks_result.scalars().all()
+                # Получаем список акций с новой сессией
+                async with async_session() as session:
+                    all_stocks_result = await session.execute(select(Stock))
+                    all_stocks = all_stocks_result.scalars().all()
 
                 if not all_stocks:
                     logger.info("Нет доступных акций для торговли")
@@ -355,10 +358,16 @@ class TradingBot:
                 for stock in all_stocks:
                     figi = stock.figi
                     if not figi:
-                        figi = await self.update_figi(client, stock, session)
+                        figi = await self.update_figi(client, stock)
                         if not figi:
                             logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
                             continue
+                        # Обновляем FIGI в базе
+                        async with async_session() as session:
+                            stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
+                            stock_to_update = stock_result.scalars().first()
+                            stock_to_update.figi = figi
+                            await session.commit()
                     figis_to_subscribe.append(figi)
 
                     backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
@@ -386,155 +395,156 @@ class TradingBot:
                         break
 
                     figi = candle.candle.figi
-                    stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
-                    stock = stock_result.scalars().first()
-                    if not stock:
-                        logger.warning(f"Акция с FIGI {figi} не найдена в базе")
-                        continue
-
-                    ticker = stock.ticker
-                    current_price = candle.candle.close.units + candle.candle.close.nano / 1e9
-                    candle_data = {
-                        "close": current_price,
-                        "high": candle.candle.high.units + candle.candle.high.nano / 1e9,
-                        "low": candle.candle.low.units + candle.candle.low.nano / 1e9,
-                        "time": candle.candle.time
-                    }
-
-                    if ticker not in self.historical_data:
-                        self.historical_data[ticker] = []
-                    self.historical_data[ticker].append(candle_data)
-                    if len(self.historical_data[ticker]) > 100:
-                        self.historical_data[ticker] = self.historical_data[ticker][-100:]
-
-                    news = await self.fetch_news(ticker)
-                    if self.is_negative_news(news):
-                        logger.warning(f"Негативные новости для {ticker}, торговля приостановлена")
-                        continue
-
-                    portfolio = await client.operations.get_portfolio(account_id=account_id)
-                    total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
-                    positions = await client.operations.get_positions(account_id=account_id)
-                    holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
-
-                    prices = [c["close"] for c in self.historical_data[ticker]]
-                    candles = [
-                        type('Candle', (), {
-                            "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
-                            "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
-                            "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
-                        }) for c in self.historical_data[ticker]
-                    ]
-
-                    # Проверки на достаточность данных
-                    required_length = 35  # Для MACD и Bollinger Bands
-                    if len(prices) < required_length:
-                        logger.warning(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}")
-                        continue
-
-                    rsi = self.calculate_rsi(prices)
-                    macd, signal, histogram = self.calculate_macd(prices)
-                    atr = self.calculate_atr(candles)
-                    sma, upper_band, lower_band = self.calculate_bollinger_bands(prices)
-                    predicted_price = self.predict_price(ticker, prices)
-
-                    if any(x is None for x in [rsi, macd, atr, sma, predicted_price]):
-                        logger.warning(f"Невозможно рассчитать индикаторы или предсказание для {ticker}")
-                        continue
-
-                    buy_signal = False
-                    if (rsi < 30 and histogram > 0 and current_price < lower_band and
-                            predicted_price > current_price * 1.02):
-                        buy_signal = True
-                        logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price:.2f}")
-
-                    if buy_signal:
-                        max_position_cost = total_balance * 0.1
-                        quantity = min(int(max_position_cost // current_price), 10)
-                        if quantity <= 0:
-                            logger.info(f"Недостаточно средств для покупки {ticker}")
+                    # Используем новую сессию для каждой итерации
+                    async with async_session() as session:
+                        stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
+                        stock = stock_result.scalars().first()
+                        if not stock:
+                            logger.warning(f"Акция с FIGI {figi} не найдена в базе")
                             continue
-                        total_cost = quantity * current_price
-                        if total_cost <= total_balance:
-                            order_response = await client.orders.post_order(
-                                account_id=account_id,
-                                figi=figi,
-                                quantity=quantity,
-                                direction=OrderDirection.ORDER_DIRECTION_BUY,
-                                order_type=OrderType.ORDER_TYPE_MARKET
-                            )
-                            logger.info(f"Куплено {quantity} акций {ticker} по цене {current_price} для пользователя {user_id}")
-                            self.status = f"Совершил покупку: {quantity} акций {ticker}"
-                            await self.bot.send_message(user_id, f"📈 Куплено {quantity} акций {ticker} по цене {current_price} RUB")
-                            trade = TradeHistory(
-                                user_id=user_id,
-                                ticker=ticker,
-                                action="buy",
-                                price=current_price,
-                                quantity=quantity,
-                                total=total_cost,
-                                created_at=datetime.utcnow()
-                            )
-                            session.add(trade)
-                            await session.commit()
 
-                            atr_multiplier = 2
-                            stop_loss = current_price - atr * atr_multiplier
-                            take_profit = current_price + atr * atr_multiplier * 2
-                            self.positions[figi] = {
-                                "entry_price": current_price,
-                                "quantity": quantity,
-                                "stop_loss": stop_loss,
-                                "take_profit": take_profit,
-                                "highest_price": current_price
-                            }
+                        ticker = stock.ticker
+                        current_price = candle.candle.close.units + candle.candle.close.nano / 1e9
+                        candle_data = {
+                            "close": current_price,
+                            "high": candle.candle.high.units + candle.candle.high.nano / 1e9,
+                            "low": candle.candle.low.units + candle.candle.low.nano / 1e9,
+                            "time": candle.candle.time
+                        }
 
-                    available_to_sell = holdings.get(figi, 0)
-                    if available_to_sell > 0 and figi in self.positions:
-                        position = self.positions[figi]
-                        entry_price = position["entry_price"]
-                        highest_price = max(position["highest_price"], current_price)
-                        position["highest_price"] = highest_price
+                        if ticker not in self.historical_data:
+                            self.historical_data[ticker] = []
+                        self.historical_data[ticker].append(candle_data)
+                        if len(self.historical_data[ticker]) > 100:
+                            self.historical_data[ticker] = self.historical_data[ticker][-100:]
 
-                        trailing_stop = highest_price - atr * 2
-                        position["stop_loss"] = max(position["stop_loss"], trailing_stop)
+                        news = await self.fetch_news(ticker)
+                        if self.is_negative_news(news):
+                            logger.warning(f"Негативные новости для {ticker}, торговля приостановлена")
+                            continue
 
-                        sell_signal = False
-                        if (rsi > 70 and histogram < 0 and current_price > upper_band) or \
-                           current_price >= position["take_profit"] or \
-                           current_price <= position["stop_loss"] or \
-                           (predicted_price < current_price * 0.98):
-                            sell_signal = True
-                            logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}, Predicted Price={predicted_price:.2f}")
+                        portfolio = await client.operations.get_portfolio(account_id=account_id)
+                        total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
+                        positions = await client.operations.get_positions(account_id=account_id)
+                        holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                        if sell_signal:
-                            quantity = min(available_to_sell, 10)
-                            total_revenue = quantity * current_price
-                            order_response = await client.orders.post_order(
-                                account_id=account_id,
-                                figi=figi,
-                                quantity=quantity,
-                                direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                order_type=OrderType.ORDER_TYPE_MARKET
-                            )
-                            logger.info(f"Продано {quantity} акций {ticker} по цене {current_price} для пользователя {user_id}")
-                            self.status = f"Совершил продажу: {quantity} акций {ticker}"
-                            await self.bot.send_message(user_id, f"📉 Продано {quantity} акций {ticker} по цене {current_price} RUB")
-                            trade = TradeHistory(
-                                user_id=user_id,
-                                ticker=ticker,
-                                action="sell",
-                                price=current_price,
-                                quantity=quantity,
-                                total=total_revenue,
-                                created_at=datetime.utcnow()
-                            )
-                            session.add(trade)
-                            await session.commit()
-                            if quantity == position["quantity"]:
-                                del self.positions[figi]
-                            else:
-                                self.positions[figi]["quantity"] -= quantity
+                        prices = [c["close"] for c in self.historical_data[ticker]]
+                        candles = [
+                            type('Candle', (), {
+                                "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
+                                "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
+                                "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
+                            }) for c in self.historical_data[ticker]
+                        ]
+
+                        required_length = 35
+                        if len(prices) < required_length:
+                            logger.warning(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}")
+                            continue
+
+                        rsi = self.calculate_rsi(prices)
+                        macd, signal, histogram = self.calculate_macd(prices)
+                        atr = self.calculate_atr(candles)
+                        sma, upper_band, lower_band = self.calculate_bollinger_bands(prices)
+                        predicted_price = self.predict_price(ticker, prices)
+
+                        if any(x is None for x in [rsi, macd, atr, sma, predicted_price]):
+                            logger.warning(f"Невозможно рассчитать индикаторы или предсказание для {ticker}")
+                            continue
+
+                        buy_signal = False
+                        if (rsi < 30 and histogram > 0 and current_price < lower_band and
+                                predicted_price > current_price * 1.02):
+                            buy_signal = True
+                            logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price:.2f}")
+
+                        if buy_signal:
+                            max_position_cost = total_balance * 0.1
+                            quantity = min(int(max_position_cost // current_price), 10)
+                            if quantity <= 0:
+                                logger.info(f"Недостаточно средств для покупки {ticker}")
+                                continue
+                            total_cost = quantity * current_price
+                            if total_cost <= total_balance:
+                                order_response = await client.orders.post_order(
+                                    account_id=account_id,
+                                    figi=figi,
+                                    quantity=quantity,
+                                    direction=OrderDirection.ORDER_DIRECTION_BUY,
+                                    order_type=OrderType.ORDER_TYPE_MARKET
+                                )
+                                logger.info(f"Куплено {quantity} акций {ticker} по цене {current_price} для пользователя {user_id}")
+                                self.status = f"Совершил покупку: {quantity} акций {ticker}"
+                                await self.bot.send_message(user_id, f"📈 Куплено {quantity} акций {ticker} по цене {current_price} RUB")
+                                trade = TradeHistory(
+                                    user_id=user_id,
+                                    ticker=ticker,
+                                    action="buy",
+                                    price=current_price,
+                                    quantity=quantity,
+                                    total=total_cost,
+                                    created_at=datetime.utcnow()
+                                )
+                                session.add(trade)
+                                await session.commit()
+
+                                atr_multiplier = 2
+                                stop_loss = current_price - atr * atr_multiplier
+                                take_profit = current_price + atr * atr_multiplier * 2
+                                self.positions[figi] = {
+                                    "entry_price": current_price,
+                                    "quantity": quantity,
+                                    "stop_loss": stop_loss,
+                                    "take_profit": take_profit,
+                                    "highest_price": current_price
+                                }
+
+                        available_to_sell = holdings.get(figi, 0)
+                        if available_to_sell > 0 and figi in self.positions:
+                            position = self.positions[figi]
+                            entry_price = position["entry_price"]
+                            highest_price = max(position["highest_price"], current_price)
+                            position["highest_price"] = highest_price
+
+                            trailing_stop = highest_price - atr * 2
+                            position["stop_loss"] = max(position["stop_loss"], trailing_stop)
+
+                            sell_signal = False
+                            if (rsi > 70 and histogram < 0 and current_price > upper_band) or \
+                               current_price >= position["take_profit"] or \
+                               current_price <= position["stop_loss"] or \
+                               (predicted_price < current_price * 0.98):
+                                sell_signal = True
+                                logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}, Predicted Price={predicted_price:.2f}")
+
+                            if sell_signal:
+                                quantity = min(available_to_sell, 10)
+                                total_revenue = quantity * current_price
+                                order_response = await client.orders.post_order(
+                                    account_id=account_id,
+                                    figi=figi,
+                                    quantity=quantity,
+                                    direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                    order_type=OrderType.ORDER_TYPE_MARKET
+                                )
+                                logger.info(f"Продано {quantity} акций {ticker} по цене {current_price} для пользователя {user_id}")
+                                self.status = f"Совершил продажу: {quantity} акций {ticker}"
+                                await self.bot.send_message(user_id, f"📉 Продано {quantity} акций {ticker} по цене {current_price} RUB")
+                                trade = TradeHistory(
+                                    user_id=user_id,
+                                    ticker=ticker,
+                                    action="sell",
+                                    price=current_price,
+                                    quantity=quantity,
+                                    total=total_revenue,
+                                    created_at=datetime.utcnow()
+                                )
+                                session.add(trade)
+                                await session.commit()
+                                if quantity == position["quantity"]:
+                                    del self.positions[figi]
+                                else:
+                                    self.positions[figi]["quantity"] -= quantity
 
                     await asyncio.sleep(0.1)
 

@@ -122,7 +122,8 @@ async def start_streaming_for_users():
                 return
             for user in users:
                 logger.info(f"Запуск стриминга для пользователя {user.user_id}")
-                task = asyncio.create_task(trading_bot.stream_and_trade(session, user.user_id))
+                # Создаём задачу без передачи сессии
+                task = asyncio.create_task(trading_bot.stream_and_trade(user.user_id))
                 trading_bot.stream_task = task
         except Exception as e:
             logger.error(f"Ошибка при запуске стриминга: {e}")
