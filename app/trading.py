@@ -25,11 +25,12 @@ class TradingBot:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.status = "Ожидание"
-        self.positions: Dict[str, Dict] = {}  # {figi: {"entry_price": float, "quantity": int, "stop_loss": float, "take_profit": float}}
-        self.ml_models: Dict[str, LinearRegression] = {}  # Модели ML для каждого тикера
-        self.news_cache: Dict[str, List[Dict]] = {}  # Кэш новостей
-        self.historical_data: Dict[str, List] = {}  # Исторические данные для ML и backtesting
-        self.running = False  # Флаг для управления стримингом
+        self.positions: Dict[str, Dict] = {}
+        self.ml_models: Dict[str, LinearRegression] = {}
+        self.news_cache: Dict[str, List[Dict]] = {}
+        self.historical_data: Dict[str, List] = {}
+        self.running = False
+        self.stream_task = None  # Для хранения задачи стриминга
 
     async def debug_available_shares(self, client: AsyncClient):
         """Отладочная функция для вывода доступных акций."""
@@ -96,6 +97,8 @@ class TradingBot:
 
     def is_negative_news(self, articles: List[Dict]) -> bool:
         """Проверяет, есть ли негативные новости."""
+        if not articles:
+            return False
         negative_keywords = {"падение", "кризис", "убытки", "снижение", "скандал", "санкции"}
         for article in articles:
             title = article.get("title", "").lower()
@@ -192,7 +195,6 @@ class TradingBot:
             logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}")
             return
 
-        # Подготовка данных для ML
         X = []
         y = []
         for i in range(30, len(prices) - 1):
@@ -203,7 +205,7 @@ class TradingBot:
                 continue
             features = [window[-1], rsi, macd - signal]
             X.append(features)
-            y.append(prices[i+1])  # Предсказываем следующую цену
+            y.append(prices[i+1])
 
         if len(X) < 10:
             logger.warning(f"Недостаточно данных для обучения ML после расчёта индикаторов для {ticker}")
@@ -241,8 +243,8 @@ class TradingBot:
         if len(prices) < 60:
             return {"profit": 0, "trades": 0}
 
-        balance = 100000  # Начальный баланс для теста
-        position = 0  # Количество акций
+        balance = 100000
+        position = 0
         total_trades = 0
         entry_price = 0
 
@@ -349,7 +351,6 @@ class TradingBot:
                     await self.bot.send_message(user_id, "📉 Нет доступных акций для торговли.")
                     return
 
-                # Подготовка: backtesting и обучение ML моделей
                 figis_to_subscribe = []
                 for stock in all_stocks:
                     figi = stock.figi
@@ -360,13 +361,11 @@ class TradingBot:
                             continue
                     figis_to_subscribe.append(figi)
 
-                    # Backtesting
                     backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
                     if backtest_result["profit"] < 0:
                         logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
                         continue
 
-                    # Обучение ML модели
                     await self.train_ml_model(stock.ticker, client, figi)
 
                 if not figis_to_subscribe:
@@ -375,7 +374,6 @@ class TradingBot:
                     await self.bot.send_message(user_id, "📉 Нет подходящих тикеров для торговли после тестирования стратегии.")
                     return
 
-                # Настройка стриминга свечей
                 self.status = "Подписка на свечи"
                 subscribe_request = SubscribeCandlesRequest(
                     subscription_action=SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE,
@@ -403,32 +401,36 @@ class TradingBot:
                         "time": candle.candle.time
                     }
 
-                    # Обновляем исторические данные
                     if ticker not in self.historical_data:
                         self.historical_data[ticker] = []
                     self.historical_data[ticker].append(candle_data)
                     if len(self.historical_data[ticker]) > 100:
                         self.historical_data[ticker] = self.historical_data[ticker][-100:]
 
-                    # Проверка новостей
                     news = await self.fetch_news(ticker)
                     if self.is_negative_news(news):
                         logger.warning(f"Негативные новости для {ticker}, торговля приостановлена")
                         continue
 
-                    # Получаем портфель и баланс
                     portfolio = await client.operations.get_portfolio(account_id=account_id)
                     total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
                     positions = await client.operations.get_positions(account_id=account_id)
                     holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                    # Индикаторы
                     prices = [c["close"] for c in self.historical_data[ticker]]
-                    candles = [type('Candle', (), {
-                        "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
-                        "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
-                        "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
-                    }) for c in self.historical_data[ticker]]
+                    candles = [
+                        type('Candle', (), {
+                            "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
+                            "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
+                            "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
+                        }) for c in self.historical_data[ticker]
+                    ]
+
+                    # Проверки на достаточность данных
+                    required_length = 35  # Для MACD и Bollinger Bands
+                    if len(prices) < required_length:
+                        logger.warning(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}")
+                        continue
 
                     rsi = self.calculate_rsi(prices)
                     macd, signal, histogram = self.calculate_macd(prices)
@@ -440,7 +442,6 @@ class TradingBot:
                         logger.warning(f"Невозможно рассчитать индикаторы или предсказание для {ticker}")
                         continue
 
-                    # Правила покупки
                     buy_signal = False
                     if (rsi < 30 and histogram > 0 and current_price < lower_band and
                             predicted_price > current_price * 1.02):
@@ -477,7 +478,6 @@ class TradingBot:
                             session.add(trade)
                             await session.commit()
 
-                            # Trailing stop: начальные значения
                             atr_multiplier = 2
                             stop_loss = current_price - atr * atr_multiplier
                             take_profit = current_price + atr * atr_multiplier * 2
@@ -489,7 +489,6 @@ class TradingBot:
                                 "highest_price": current_price
                             }
 
-                    # Правила продажи
                     available_to_sell = holdings.get(figi, 0)
                     if available_to_sell > 0 and figi in self.positions:
                         position = self.positions[figi]
@@ -497,7 +496,6 @@ class TradingBot:
                         highest_price = max(position["highest_price"], current_price)
                         position["highest_price"] = highest_price
 
-                        # Trailing stop: обновляем стоп-лосс
                         trailing_stop = highest_price - atr * 2
                         position["stop_loss"] = max(position["stop_loss"], trailing_stop)
 
@@ -551,6 +549,9 @@ class TradingBot:
         """Останавливает стриминг."""
         self.running = False
         self.status = "Остановлен"
+        if self.stream_task:
+            self.stream_task.cancel()
+            self.stream_task = None
 
     def get_status(self):
         return self.status

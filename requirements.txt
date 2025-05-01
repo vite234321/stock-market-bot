@@ -1,8 +1,10 @@
-aiogram==3.8.0
-apscheduler==3.10.4
-httpx==0.27.0
-pydantic==2.7.4
-SQLAlchemy[asyncio]==2.0.31
+fastapi==0.110.0
+aiogram==3.4.1
+sqlalchemy[asyncio]==2.0.29
 asyncpg==0.29.0
-tinkoff-investments==0.2.0b111  
-psycopg==3.2.1
+apscheduler==3.10.4
+tinkoff-investments==0.2.0
+matplotlib==3.8.4
+scikit-learn==1.5.0
+newsapi-python==0.2.7
+uvicorn==0.29.0  # Добавляем uvicorn
