@@ -12,7 +12,7 @@ from app.models import User, Stock
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tinkoff.invest import AsyncClient, InstrumentIdType
-from tinkoff.invest.exceptions import InvestError  # Заменяем TinkoffInvestError на InvestError
+from tinkoff.invest.exceptions import InvestError
 import logging
 import os
 import asyncio
@@ -23,10 +23,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Выводим версию aiogram в логи
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
-# Инициализация бота
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен в переменных окружения")
@@ -36,40 +34,12 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 
-# Инициализация диспетчера
 dp = Dispatcher()
-
-# Регистрируем router в диспетчере
 dp.include_router(router)
-
-# Регистрируем middleware через диспетчер
 dp.update.middleware(DbSessionMiddleware(async_session))
 
-# Инициализация торгового бота
 trading_bot = TradingBot(bot)
-
-# Инициализация планировщика
 scheduler = AsyncIOScheduler()
-
-async def run_autotrading():
-    logger.info("Запуск автоторговли для всех пользователей")
-    async with async_session() as session:
-        try:
-            result = await session.execute(
-                select(User).where(
-                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
-                )
-            )
-            users = result.scalars().all()
-            if not users:
-                logger.info("Нет пользователей с включённой автоторговлей")
-                return
-            for user in users:
-                logger.info(f"Обработка пользователя {user.user_id}")
-                await trading_bot.analyze_and_trade(session, user.user_id)
-                logger.info(f"Статус бота для пользователя {user.user_id}: {trading_bot.get_status()}")
-        except Exception as e:
-            logger.error(f"Ошибка при запуске автоторговли: {e}")
 
 async def update_figi_for_all_stocks():
     logger.info("Запуск обновления FIGI для всех акций")
@@ -96,7 +66,6 @@ async def update_figi_for_all_stocks():
                 for i in range(0, len(stocks), batch_size):
                     batch = stocks[i:i + batch_size]
                     for stock in batch:
-                        # Исправляем тикер, убирая .ME
                         original_ticker = stock.ticker
                         stock.ticker = stock.ticker.replace('.ME', '')
                         logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
@@ -139,32 +108,68 @@ async def update_figi_for_all_stocks():
         except Exception as e:
             logger.error(f"Ошибка при обновлении FIGI: {e}")
 
+async def start_streaming_for_users():
+    logger.info("Запуск стриминга для всех пользователей")
+    async with async_session() as session:
+        try:
+            result = await session.execute(
+                select(User).where(
+                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
+                )
+            )
+            users = result.scalars().all()
+            if not users:
+                logger.info("Нет пользователей с включённой автоторговлей")
+                return
+            for user in users:
+                logger.info(f"Запуск стриминга для пользователя {user.user_id}")
+                asyncio.create_task(trading_bot.stream_and_trade(session, user.user_id))
+        except Exception as e:
+            logger.error(f"Ошибка при запуске стриминга: {e}")
+
+async def send_daily_reports():
+    logger.info("Отправка дневных отчётов")
+    async with async_session() as session:
+        try:
+            result = await session.execute(
+                select(User).where(
+                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
+                )
+            )
+            users = result.scalars().all()
+            for user in users:
+                await trading_bot.send_daily_profit_report(session, user.user_id)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке дневных отчётов: {e}")
+
 @app.on_event("startup")
 async def on_startup():
     logger.info("Запуск бота...")
-    # Инициализация базы данных
     try:
         await init_db()
         logger.info("База данных успешно инициализирована.")
     except Exception as e:
         logger.error(f"Не удалось инициализировать базу данных: {e}")
         raise
-    # Удаляем вебхук и начинаем polling
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён, очередь обновлений очищена")
     logger.info("Запуск polling на Heroku")
-    # Запускаем polling через диспетчер
     asyncio.create_task(dp.start_polling(bot))
-    # Запускаем автоторговлю каждые 5 минут
-    scheduler.add_job(run_autotrading, "interval", minutes=5)
+    
+    # Запускаем стриминг
+    await start_streaming_for_users()
+    
     # Запускаем обновление FIGI каждый час
     scheduler.add_job(update_figi_for_all_stocks, "interval", hours=1)
+    # Запускаем ежедневный отчёт в 22:00
+    scheduler.add_job(send_daily_reports, "cron", hour=22, minute=0)
     scheduler.start()
     logger.info("Планировщик запущен")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Остановка бота...")
+    trading_bot.stop_streaming()
     scheduler.shutdown()
     await dp.stop_polling()
     await bot.session.close()
