@@ -18,6 +18,7 @@ class TradingBot:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.status = "Ожидание"
+        self.positions = {}  # Храним открытые позиции: {figi: {"entry_price": float, "quantity": int}}
 
     async def debug_available_shares(self, client: AsyncClient):
         """Отладочная функция для вывода доступных акций."""
@@ -30,11 +31,86 @@ class TradingBot:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
     async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession):
-        """Проверяет наличие FIGI в базе. Если его нет, логирует предупреждение."""
+        """Проверяет наличие FIGI в базе. Если его нет, пытается обновить."""
         if stock.figi:
             return stock.figi
-        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе. Ожидается, что stock-market-collector обновит FIGI.")
-        return None
+        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пытаемся обновить...")
+        try:
+            cleaned_ticker = stock.ticker.replace(".ME", "")
+            response = await client.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code="TQBR",
+                id=cleaned_ticker
+            )
+            stock.figi = response.instrument.figi
+            session.add(stock)
+            await session.commit()
+            logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
+            return stock.figi
+        except InvestError as e:
+            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
+            return None
+
+    def calculate_rsi(self, prices, period=14):
+        """Рассчитывает RSI (Relative Strength Index)."""
+        if len(prices) < period + 1:
+            return None
+        gains = []
+        losses = []
+        for i in range(1, len(prices)):
+            change = prices[i] - prices[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def calculate_macd(self, prices, fast_period=12, slow_period=26, signal_period=9):
+        """Рассчитывает MACD и сигнальную линию."""
+        if len(prices) < slow_period + signal_period:
+            return None, None, None
+        # Рассчитываем экспоненциальные скользящие средние (EMA)
+        def ema(data, period):
+            ema_values = []
+            k = 2 / (period + 1)
+            ema_values.append(sum(data[:period]) / period)  # Первое значение — простая средняя
+            for i in range(period, len(data)):
+                ema_value = data[i] * k + ema_values[-1] * (1 - k)
+                ema_values.append(ema_value)
+            return ema_values
+
+        # EMA для быстрого и медленного периодов
+        ema_fast = ema(prices, fast_period)
+        ema_slow = ema(prices, slow_period)
+        # MACD = EMA(fast) - EMA(slow)
+        macd = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
+        # Сигнальная линия — EMA MACD
+        signal = ema(macd, signal_period)
+        # Гистограмма = MACD - Signal
+        histogram = [macd[i + signal_period - 1] - signal[i] for i in range(len(signal))]
+        return macd[-1], signal[-1], histogram[-1]
+
+    def calculate_atr(self, candles, period=14):
+        """Рассчитывает ATR (Average True Range) для оценки волатильности."""
+        if len(candles) < period + 1:
+            return None
+        tr_values = []
+        for i in range(1, len(candles)):
+            high = candles[i].high.units + candles[i].high.nano / 1e9
+            low = candles[i].low.units + candles[i].low.nano / 1e9
+            prev_close = candles[i-1].close.units + candles[i-1].close.nano / 1e9
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_values.append(tr)
+        atr = sum(tr_values[-period:]) / period
+        return atr
 
     async def analyze_and_trade(self, session: AsyncSession, user_id: int):
         logger.info(f"Запуск анализа и торговли для пользователя {user_id}")
@@ -81,16 +157,17 @@ class TradingBot:
 
                 self.status = "Ищет возможности для торговли"
                 logger.info(f"Статус бота для пользователя {user_id}: {self.status}")
-                await self.bot.send_message(user_id, "🔍 Бот ищет возможности для торговли...")
 
                 for stock in all_stocks:
                     figi = stock.figi
                     if not figi:
-                        logger.warning(f"FIGI для {stock.ticker} отсутствует в базе, пропускаем...")
-                        continue
+                        figi = await self.update_figi(client, stock, session)
+                        if not figi:
+                            logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
+                            continue
 
                     end_date = datetime.utcnow()
-                    start_date = end_date - timedelta(days=30)
+                    start_date = end_date - timedelta(days=60)  # Больше данных для расчёта индикаторов
                     logger.info(f"Запрашиваем свечи для {stock.ticker} (FIGI: {figi})")
                     try:
                         candles = await client.market_data.get_candles(
@@ -109,46 +186,83 @@ class TradingBot:
                         continue
 
                     prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                    if len(prices) < 5:
+                    if len(prices) < 35:  # Нужно достаточно данных для MACD (26 + 9)
                         logger.warning(f"Недостаточно данных для анализа {stock.ticker}")
                         continue
 
-                    sma = sum(prices[-5:]) / 5
+                    # Рассчитываем индикаторы
+                    rsi = self.calculate_rsi(prices)
+                    macd, signal, histogram = self.calculate_macd(prices)
+                    atr = self.calculate_atr(candles.candles)
+                    if rsi is None or macd is None or atr is None:
+                        logger.warning(f"Невозможно рассчитать индикаторы для {stock.ticker}")
+                        continue
+
                     current_price = stock.last_price
-                    volume = stock.volume if stock.volume else 0
+                    if not current_price:
+                        logger.warning(f"Текущая цена для {stock.ticker} отсутствует")
+                        continue
 
-                    trend_up = prices[-1] > prices[-2] > prices[-3]
-                    if current_price < sma and trend_up and volume > 10000:
-                        quantity = min(int(total_balance // current_price), 10)
-                        if quantity > 0:
-                            total_cost = quantity * current_price
-                            if total_cost <= total_balance:
-                                order_response = await client.orders.post_order(
-                                    account_id=account_id,
-                                    figi=figi,
-                                    quantity=quantity,
-                                    direction=OrderDirection.ORDER_DIRECTION_BUY,
-                                    order_type=OrderType.ORDER_TYPE_MARKET
-                                )
-                                logger.info(f"Куплено {quantity} акций {stock.ticker} по цене {current_price} для пользователя {user_id}")
-                                self.status = f"Совершил покупку: {quantity} акций {stock.ticker}"
-                                await self.bot.send_message(user_id, f"📈 Куплено {quantity} акций {stock.ticker} по цене {current_price} RUB")
-                                trade = TradeHistory(
-                                    user_id=user_id,
-                                    ticker=stock.ticker,
-                                    action="buy",
-                                    price=current_price,
-                                    quantity=quantity,
-                                    total=total_cost,
-                                    created_at=datetime.utcnow()
-                                )
-                                session.add(trade)
-                                await session.commit()
+                    # Правила покупки
+                    buy_signal = False
+                    if rsi < 30 and histogram > 0:  # Перепроданность и бычье пересечение MACD
+                        buy_signal = True
+                        logger.info(f"Сигнал на покупку {stock.ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}")
 
-                    trend_down = prices[-1] < prices[-2] < prices[-3]
-                    if current_price > sma * 1.10 and trend_down:
-                        available_to_sell = holdings.get(figi, 0)
-                        if available_to_sell > 0:
+                    if buy_signal:
+                        max_position_cost = total_balance * 0.1  # Не более 10% баланса на одну сделку
+                        quantity = min(int(max_position_cost // current_price), 10)
+                        if quantity <= 0:
+                            logger.info(f"Недостаточно средств для покупки {stock.ticker}")
+                            continue
+                        total_cost = quantity * current_price
+                        if total_cost <= total_balance:
+                            order_response = await client.orders.post_order(
+                                account_id=account_id,
+                                figi=figi,
+                                quantity=quantity,
+                                direction=OrderDirection.ORDER_DIRECTION_BUY,
+                                order_type=OrderType.ORDER_TYPE_MARKET
+                            )
+                            logger.info(f"Куплено {quantity} акций {stock.ticker} по цене {current_price} для пользователя {user_id}")
+                            self.status = f"Совершил покупку: {quantity} акций {stock.ticker}"
+                            await self.bot.send_message(user_id, f"📈 Куплено {quantity} акций {stock.ticker} по цене {current_price} RUB")
+                            trade = TradeHistory(
+                                user_id=user_id,
+                                ticker=stock.ticker,
+                                action="buy",
+                                price=current_price,
+                                quantity=quantity,
+                                total=total_cost,
+                                created_at=datetime.utcnow()
+                            )
+                            session.add(trade)
+                            await session.commit()
+                            self.positions[figi] = {"entry_price": current_price, "quantity": quantity}
+
+                    # Правила продажи
+                    available_to_sell = holdings.get(figi, 0)
+                    if available_to_sell > 0 and figi in self.positions:
+                        position = self.positions[figi]
+                        entry_price = position["entry_price"]
+                        profit_percent = (current_price - entry_price) / entry_price * 100
+                        loss_percent = (entry_price - current_price) / entry_price * 100
+                        atr_multiplier = 2  # Используем ATR для динамического стоп-лосса
+                        dynamic_stop_loss = entry_price - atr * atr_multiplier
+                        dynamic_take_profit = entry_price + atr * atr_multiplier * 2
+
+                        sell_signal = False
+                        if rsi > 70 and histogram < 0:  # Перекупленность и медвежье пересечение MACD
+                            sell_signal = True
+                            logger.info(f"Сигнал на продажу {stock.ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}")
+                        elif current_price >= dynamic_take_profit:  # Тейк-профит
+                            sell_signal = True
+                            logger.info(f"Сигнал на продажу {stock.ticker}: Достигнут тейк-профит {current_price} >= {dynamic_take_profit}")
+                        elif current_price <= dynamic_stop_loss:  # Стоп-лосс
+                            sell_signal = True
+                            logger.info(f"Сигнал на продажу {stock.ticker}: Достигнут стоп-лосс {current_price} <= {dynamic_stop_loss}")
+
+                        if sell_signal:
                             quantity = min(available_to_sell, 10)
                             total_revenue = quantity * current_price
                             order_response = await client.orders.post_order(
@@ -172,12 +286,15 @@ class TradingBot:
                             )
                             session.add(trade)
                             await session.commit()
+                            if quantity == position["quantity"]:
+                                del self.positions[figi]
+                            else:
+                                self.positions[figi]["quantity"] -= quantity
 
                     await asyncio.sleep(0.5)
 
                 self.status = "Ожидание следующего цикла"
                 logger.info(f"Статус бота для пользователя {user_id}: {self.status}")
-                await self.bot.send_message(user_id, "⏳ Ожидание следующего цикла торговли...")
 
         except Exception as e:
             logger.error(f"Ошибка автоторговли для пользователя {user_id}: {e}")
