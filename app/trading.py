@@ -31,6 +31,7 @@ class TradingBot:
         self.historical_data: Dict[str, List] = {}
         self.running = False
         self.stream_tasks: Dict[int, asyncio.Task] = {}
+        self.streaming_client = None  # Для хранения клиента стриминга
 
     async def debug_available_shares(self, client: AsyncClient):
         try:
@@ -443,6 +444,9 @@ class TradingBot:
                         for figi in figis_to_subscribe
                     ]
                 )
+
+                # Инициализируем клиента стриминга
+                self.streaming_client = client
                 async for candle in client.market_data_stream.market_data_stream(subscribe_request):
                     if not self.running:
                         logger.info("Остановка стриминга")
@@ -482,18 +486,23 @@ class TradingBot:
                         positions = await client.operations.get_positions(account_id=account_id)
                         holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                        prices = [c["close"] for c in self.historical_data[ticker]]
+                        # Проверяем, достаточно ли данных для расчёта индикаторов
+                        if ticker not in self.historical_data or len(self.historical_data[ticker]) < 35:
+                            logger.info(f"Недостаточно данных для {ticker}: {len(self.historical_data[ticker]) if ticker in self.historical_data else 0} свечей, требуется 35. Ожидаем накопления данных...")
+                            continue
+
+                        prices = [c["close"] for c in self.historical_data[ticker][-35:]]
                         candles = [
                             type('Candle', (), {
                                 "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
                                 "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
                                 "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
-                            }) for c in self.historical_data[ticker]
+                            }) for c in self.historical_data[ticker][-35:]
                         ]
 
-                        required_length = 35
-                        if len(prices) < required_length:
-                            logger.info(f"Недостаточно данных для {ticker}: {len(prices)} свечей, требуется {required_length}. Ожидаем накопления данных...")
+                        # Дополнительная проверка на длину списка candles
+                        if len(candles) < 35:
+                            logger.warning(f"Недостаточно свечей для расчёта индикаторов для {ticker}: {len(candles)} свечей, требуется 35")
                             continue
 
                         rsi = self.calculate_rsi(prices)
@@ -612,15 +621,34 @@ class TradingBot:
     def stop_streaming(self, user_id: int = None):
         self.running = False
         self.status = "Остановлен"
+        
+        # Закрываем стриминг, если он активен
+        if self.streaming_client:
+            try:
+                self.streaming_client.__aexit__(None, None, None)  # Закрываем контекстный менеджер
+                logger.info("Клиент стриминга закрыт")
+            except Exception as e:
+                logger.error(f"Ошибка при закрытии клиента стриминга: {e}")
+            finally:
+                self.streaming_client = None
+
         if user_id:
             if user_id in self.stream_tasks:
                 task = self.stream_tasks[user_id]
                 task.cancel()
+                try:
+                    asyncio.get_event_loop().run_until_complete(task)
+                except asyncio.CancelledError:
+                    logger.info(f"Задача стриминга для пользователя {user_id} отменена")
                 del self.stream_tasks[user_id]
                 logger.info(f"Стриминг остановлен для пользователя {user_id}")
         else:
             for user_id, task in list(self.stream_tasks.items()):
                 task.cancel()
+                try:
+                    asyncio.get_event_loop().run_until_complete(task)
+                except asyncio.CancelledError:
+                    logger.info(f"Задача стриминга для пользователя {user_id} отменена")
                 del self.stream_tasks[user_id]
             logger.info("Стриминг остановлен для всех пользователей")
 
