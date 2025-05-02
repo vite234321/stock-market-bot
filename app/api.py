@@ -199,16 +199,19 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Остановка бота...")
+    # Останавливаем стриминг и ждём завершения задач
     trading_bot.stop_streaming()
+    # Ждём завершения всех задач стриминга
+    if trading_bot.stream_tasks:
+        await asyncio.gather(*[task for task in trading_bot.stream_tasks.values()], return_exceptions=True)
+        logger.info("Все задачи стриминга завершены")
     scheduler.shutdown()
     await dp.stop_polling()
     await bot.session.close()
     # Закрываем соединение с базой данных
     await engine.dispose()
     logger.info("Соединение с базой данных закрыто")
-    # Ждём завершения всех задач стриминга
-    await asyncio.sleep(2)  # Дополнительная задержка для завершения задач
-    logger.info("Все задачи завершены")
+    logger.info("Бот полностью остановлен")
 
 @app.post("/signals")
 async def receive_signal(signal: dict):

@@ -124,8 +124,8 @@ class TradingBot:
         return False
 
     def calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
-        if len(prices) < period + 1:
-            logger.warning(f"Недостаточно данных для расчёта RSI: {len(prices)} элементов, требуется {period + 1}")
+        if not prices or len(prices) < period + 1:
+            logger.warning(f"Недостаточно данных для расчёта RSI: {len(prices) if prices else 0} элементов, требуется {period + 1}")
             return None
         gains = []
         losses = []
@@ -146,39 +146,61 @@ class TradingBot:
         return rsi
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
-        required_length = slow_period + signal_period
-        if len(prices) < required_length:
-            logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices)} элементов, требуется {required_length}")
+        required_length = slow_period + signal_period - 1  # Учитываем, что signal требует дополнительных данных
+        if not prices or len(prices) < required_length:
+            logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices) if prices else 0} элементов, требуется {required_length}")
             return None, None, None
 
         def ema(data, period):
-            if len(data) < period:
-                logger.warning(f"Недостаточно данных для EMA: {len(data)} элементов, требуется {period}")
-                return []
+            if not data or len(data) < period:
+                logger.warning(f"Недостаточно данных для EMA: {len(data) if data else 0} элементов, требуется {period}")
+                return None
             ema_values = []
             k = 2 / (period + 1)
-            ema_values.append(sum(data[:period]) / period)
+            # Начальное значение EMA - простое среднее за period
+            initial_ema = sum(data[:period]) / period
+            ema_values.append(initial_ema)
+            # Вычисляем EMA для оставшихся значений
             for i in range(period, len(data)):
                 ema_value = data[i] * k + ema_values[-1] * (1 - k)
                 ema_values.append(ema_value)
             return ema_values
 
+        # Вычисляем EMA для быстрого и медленного периода
         ema_fast = ema(prices, fast_period)
-        ema_slow = ema(prices, slow_period)
-
-        if not ema_fast or not ema_slow:
-            logger.warning("EMA не удалось рассчитать из-за недостатка данных")
+        if ema_fast is None:
+            logger.warning("Не удалось рассчитать EMA fast из-за недостатка данных")
             return None, None, None
 
-        macd = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
-        signal = ema(macd, signal_period)
+        ema_slow = ema(prices, slow_period)
+        if ema_slow is None:
+            logger.warning("Не удалось рассчитать EMA slow из-за недостатка данных")
+            return None, None, None
 
-        if not signal:
+        # Убедимся, что ema_fast и ema_slow имеют одинаковую длину
+        min_length = min(len(ema_fast), len(ema_slow))
+        if min_length == 0:
+            logger.warning("EMA fast или slow пусты")
+            return None, None, None
+
+        macd = [ema_fast[i] - ema_slow[i] for i in range(min_length)]
+        if not macd:
+            logger.warning("MACD не удалось рассчитать: пустой список")
+            return None, None, None
+
+        # Вычисляем сигнальную линию
+        signal = ema(macd, signal_period)
+        if signal is None:
             logger.warning("Сигнальная линия MACD не может быть рассчитана")
             return None, None, None
 
+        # Последние значения для MACD, сигнальной линии и гистограммы
         signal_idx = len(signal) - 1
         macd_idx = len(macd) - 1
+        if signal_idx < 0 or macd_idx < 0:
+            logger.warning("Недостаточно данных для расчёта MACD: signal_idx или macd_idx меньше 0")
+            return None, None, None
+
         histogram = macd[macd_idx] - signal[signal_idx]
         return macd[macd_idx], signal[signal_idx], histogram
 
@@ -242,7 +264,7 @@ class TradingBot:
             window = prices[i-30:i]
             rsi = self.calculate_rsi(window)
             macd, signal, _ = self.calculate_macd(window)
-            if rsi is None or macd is None:
+            if rsi is None or macd is None or signal is None:
                 logger.warning(f"Не удалось рассчитать индикаторы для {ticker} на итерации {i}")
                 continue
             features = [window[-1], rsi, macd - signal]
@@ -265,7 +287,7 @@ class TradingBot:
         window = prices[-30:]
         rsi = self.calculate_rsi(window)
         macd, signal, _ = self.calculate_macd(window)
-        if rsi is None or macd is None:
+        if rsi is None or macd is None or signal is None:
             logger.warning(f"Не удалось рассчитать индикаторы для предсказания цены для {ticker}")
             return None
         features = np.array([[window[-1], rsi, macd - signal]])
@@ -303,7 +325,7 @@ class TradingBot:
             macd, signal, histogram = self.calculate_macd(window)
             sma, upper_band, lower_band = self.calculate_bollinger_bands(window)
             
-            if rsi is None or macd is None or sma is None:
+            if rsi is None or macd is None or signal is None or sma is None:
                 logger.warning(f"Не удалось рассчитать индикаторы для {ticker} на итерации {i}")
                 continue
 
@@ -512,12 +534,12 @@ class TradingBot:
                         sma, upper_band, lower_band = self.calculate_bollinger_bands(prices)
                         predicted_price = self.predict_price(ticker, prices)
 
-                        if any(x is None for x in [rsi, macd, atr, sma, predicted_price]):
+                        if any(x is None for x in [rsi, macd, signal, atr, sma, predicted_price]):
                             logger.warning(f"Невозможно рассчитать индикаторы или предсказание для {ticker}")
                             continue
 
                         buy_signal = False
-                        if (rsi is not None and macd is not None and sma is not None and predicted_price is not None and
+                        if (rsi is not None and macd is not None and signal is not None and sma is not None and predicted_price is not None and
                             rsi < 30 and histogram > 0 and current_price < lower_band and predicted_price > current_price * 1.02):
                             buy_signal = True
                             logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price:.2f}")
@@ -574,7 +596,7 @@ class TradingBot:
                             position["stop_loss"] = max(position["stop_loss"], trailing_stop)
 
                             sell_signal = False
-                            if (rsi is not None and macd is not None and sma is not None and predicted_price is not None and
+                            if (rsi is not None and macd is not None and signal is not None and sma is not None and predicted_price is not None and
                                 (rsi > 70 and histogram < 0 and current_price > upper_band) or
                                 current_price >= position["take_profit"] or
                                 current_price <= position["stop_loss"] or
