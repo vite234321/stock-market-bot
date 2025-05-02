@@ -1,4 +1,3 @@
-# app/api.py
 from fastapi import FastAPI
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -6,7 +5,7 @@ from aiogram.enums import ParseMode
 import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
-from app.database import init_db, async_session, engine  # Добавляем импорт engine
+from app.database import init_db, async_session, engine
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
@@ -207,7 +206,9 @@ async def on_shutdown():
     # Закрываем соединение с базой данных
     await engine.dispose()
     logger.info("Соединение с базой данных закрыто")
-    await asyncio.sleep(1)
+    # Ждём завершения всех задач стриминга
+    await asyncio.sleep(2)  # Дополнительная задержка для завершения задач
+    logger.info("Все задачи завершены")
 
 @app.post("/signals")
 async def receive_signal(signal: dict):
