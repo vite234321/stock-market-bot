@@ -6,7 +6,7 @@ from aiogram.enums import ParseMode
 import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
-from app.database import init_db, async_session
+from app.database import init_db, async_session, engine  # Добавляем импорт engine
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
@@ -204,6 +204,9 @@ async def on_shutdown():
     scheduler.shutdown()
     await dp.stop_polling()
     await bot.session.close()
+    # Закрываем соединение с базой данных
+    await engine.dispose()
+    logger.info("Соединение с базой данных закрыто")
     await asyncio.sleep(1)
 
 @app.post("/signals")

@@ -28,9 +28,8 @@ engine = create_async_engine(
     echo=True,
     connect_args={
         "statement_cache_size": 0,  # Отключаем кэш prepared statements
-        "prepared_statement_cache_size": 0,  # Дополнительно отключаем кэш на уровне asyncpg
         "server_settings": {
-            "application_name": "stock-market-bott"
+            "application_name": "stock-market-bot"
         }
     },
     pool_size=5,  # Максимальное количество подключений в пуле

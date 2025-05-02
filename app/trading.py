@@ -42,7 +42,7 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
-    async def update_figi(self, client: AsyncClient, stock: Stock) -> Optional[str]:
+    async def update_figi(self, client: AsyncClient, stock: Stock, session: AsyncSession) -> Optional[str]:
         if stock.figi:
             return stock.figi
 
@@ -60,15 +60,21 @@ class TradingBot:
 
             stock.figi = response.instrument.figi
             stock.set_figi_status(FigiStatus.SUCCESS)
+            session.add(stock)
+            await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
         except InvestError as e:
             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
             stock.set_figi_status(FigiStatus.FAILED)
+            session.add(stock)
+            await session.commit()
             return None
         except Exception as e:
             logger.error(f"Неожиданная ошибка при обновлении FIGI для {stock.ticker}: {e}")
             stock.set_figi_status(FigiStatus.FAILED)
+            session.add(stock)
+            await session.commit()
             return None
 
     async def fetch_news(self, ticker: str) -> List[Dict]:
@@ -364,6 +370,7 @@ class TradingBot:
         self.running = True
 
         try:
+            # Проверяем пользователя и токен
             async with async_session() as session:
                 user_result = await session.execute(
                     select(User).where(User.user_id == user_id)
@@ -386,6 +393,7 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
+                # Получаем список акций
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
                         select(Stock).where(Stock.figi_status != 'FAILED')
@@ -399,33 +407,23 @@ class TradingBot:
                     return
 
                 figis_to_subscribe = []
-                for stock in all_stocks:
-                    figi = stock.figi
-                    if not figi:
-                        figi = await self.update_figi(client, stock)
+                async with async_session() as session:
+                    for stock in all_stocks:
+                        figi = stock.figi
                         if not figi:
-                            logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
-                            async with async_session() as session:
-                                stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
-                                stock_to_update = stock_result.scalars().first()
-                                stock_to_update.set_figi_status(FigiStatus.FAILED)
-                                await session.commit()
+                            figi = await self.update_figi(client, stock, session)
+                            if not figi:
+                                logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
+                                continue
+
+                        figis_to_subscribe.append(figi)
+
+                        backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
+                        if backtest_result["profit"] < 0:
+                            logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
                             continue
-                        async with async_session() as session:
-                            stock_result = await session.execute(select(Stock).where(Stock.ticker == stock.ticker))
-                            stock_to_update = stock_result.scalars().first()
-                            stock_to_update.figi = figi
-                            stock_to_update.set_figi_status(FigiStatus.SUCCESS)
-                            await session.commit()
 
-                    figis_to_subscribe.append(figi)
-
-                    backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
-                    if backtest_result["profit"] < 0:
-                        logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
-                        continue
-
-                    await self.train_ml_model(stock.ticker, client, figi)
+                        await self.train_ml_model(stock.ticker, client, figi)
 
                 if not figis_to_subscribe:
                     logger.info("Нет тикеров для подписки после backtesting")
@@ -447,13 +445,13 @@ class TradingBot:
 
                 # Инициализируем клиента стриминга
                 self.streaming_client = client
-                async for candle in client.market_data_stream.market_data_stream(subscribe_request):
-                    if not self.running:
-                        logger.info("Остановка стриминга")
-                        break
+                async with async_session() as session:
+                    async for candle in client.market_data_stream.market_data_stream(subscribe_request):
+                        if not self.running:
+                            logger.info("Остановка стриминга")
+                            break
 
-                    figi = candle.candle.figi
-                    async with async_session() as session:
+                        figi = candle.candle.figi
                         stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
                         stock = stock_result.scalars().first()
                         if not stock:
@@ -609,7 +607,7 @@ class TradingBot:
                                 else:
                                     self.positions[figi]["quantity"] -= quantity
 
-                    await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.1)
 
         except Exception as e:
             logger.error(f"Ошибка стриминга и торговли для пользователя {user_id}: {e}")
