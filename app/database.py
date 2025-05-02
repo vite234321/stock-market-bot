@@ -17,7 +17,10 @@ engine = create_async_engine(
     max_overflow=20,
     pool_timeout=30,
     pool_pre_ping=True,
-    connect_args={"statement_cache_size": 0}  # Отключаем кэш подготовленных запросов
+    connect_args={
+        "statement_cache_size": 0,  # Явно отключаем кэш подготовленных запросов
+        "prepare_threshold": 0      # Устанавливаем порог подготовки в 0 для asyncpg
+    }
 )
 
 async_session = async_sessionmaker(
@@ -29,9 +32,13 @@ async_session = async_sessionmaker(
 async def init_db():
     logger.info("Инициализация базы данных...")
     async with engine.begin() as conn:
-        # Добавляем отладочную информацию
-        version = await conn.scalar("select pg_catalog.version()")
-        logger.info(f"Версия PostgreSQL: {version}")
+        # Проверяем подключение и логируем версию PostgreSQL
+        try:
+            version = await conn.scalar("select pg_catalog.version()")
+            logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке версии PostgreSQL: {e}")
+            raise
         # Создание таблиц
         from app.models import Base
         await conn.run_sync(Base.metadata.create_all)
