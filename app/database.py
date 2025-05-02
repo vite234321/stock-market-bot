@@ -5,21 +5,29 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Получаем DATABASE_URL из переменных окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL не установлен в переменных окружения")
+
+# Заменяем префикс для совместимости с asyncpg
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+logger.info(f"Используемый DATABASE_URL: {DATABASE_URL}")
 
 # Создаём асинхронный движок с отключённым кэшем подготовленных запросов
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    pool_size=10,
-    max_overflow=20,
-    pool_timeout=30,
-    pool_pre_ping=True,
+    pool_size=5,           # Уменьшаем размер пула для Heroku
+    max_overflow=10,       # Ограничиваем количество дополнительных соединений
+    pool_timeout=30,       # Таймаут ожидания соединения
+    pool_pre_ping=True,    # Проверяем соединения перед использованием
     connect_args={
-        "statement_cache_size": 0,  # Явно отключаем кэш подготовленных запросов
-        "prepare_threshold": 0      # Устанавливаем порог подготовки в 0 для asyncpg
+        "statement_cache_size": 0,  # Отключаем кэш подготовленных запросов
+        "server_settings": {
+            "application_name": "trading-bot",  # Имя приложения для отслеживания в PgBouncer
+        }
     }
 )
 
@@ -34,7 +42,7 @@ async def init_db():
     async with engine.begin() as conn:
         # Проверяем подключение и логируем версию PostgreSQL
         try:
-            version = await conn.scalar("select pg_catalog.version()")
+            version = await conn.scalar("SELECT pg_catalog.version()")
             logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
         except Exception as e:
             logger.error(f"Ошибка при проверке версии PostgreSQL: {e}")
