@@ -9,7 +9,7 @@ from tinkoff.invest import (
     AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType,
     SubscribeCandlesRequest, SubscriptionAction, SubscriptionInterval
 )
-from tinkoff.invest.exceptions import InvestError
+from tinkoff.invest.exceptions import RequestError
 from aiogram import Bot
 import html
 import httpx
@@ -53,7 +53,7 @@ class TradingBot:
                 class_code="TQBR",
                 id=cleaned_ticker
             )
-            if not hasattr(response, 'instrument') or not response.instrument.figi:
+            if not response.instrument or not response.instrument.figi:
                 logger.error(f"API Tinkoff не вернул FIGI для {stock.ticker}")
                 return None
 
@@ -63,7 +63,7 @@ class TradingBot:
             await session.commit()
             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
             return stock.figi
-        except InvestError as e:
+        except RequestError as e:
             logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
             stock.set_figi_status(FigiStatus.FAILED)
             session.add(stock)
@@ -239,17 +239,18 @@ class TradingBot:
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=365)
             try:
-                candles = await client.market_data.get_candles(
+                candles_response = await client.market_data.get_candles(
                     figi=figi,
                     from_=start_date,
                     to=end_date,
                     interval=CandleInterval.CANDLE_INTERVAL_DAY
                 )
-                if not candles.candles:
+                candles = candles_response.candles
+                if not candles:
                     logger.warning(f"Не удалось получить свечи для {ticker}")
                     return
-                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles.candles)]
+                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles]
+                self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles)]
             except Exception as e:
                 logger.error(f"Ошибка при получении свечей для {ticker}: {e}")
                 return
@@ -298,13 +299,13 @@ class TradingBot:
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=365)
         try:
-            candles = await client.market_data.get_candles(
+            candles_response = await client.market_data.get_candles(
                 figi=figi,
                 from_=start_date,
                 to=end_date,
                 interval=CandleInterval.CANDLE_INTERVAL_DAY
             )
-            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles] if candles.candles else []
+            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles_response.candles] if candles_response.candles else []
         except Exception as e:
             logger.error(f"Ошибка при получении свечей для бэктестинга {ticker}: {e}")
             return {"profit": 0, "trades": 0}
@@ -467,16 +468,17 @@ class TradingBot:
                 # Инициализируем клиента стриминга
                 self.streaming_client = client
                 async with async_session() as session:
-                    async for candle in client.market_data_stream.market_data_stream(subscribe_request):
+                    async for response in client.market_data_stream.market_data_stream(subscribe_request):
                         if not self.running:
                             logger.info("Остановка стриминга")
                             break
 
-                        if not candle.candle:
+                        if not hasattr(response, 'candle'):
                             logger.warning("Получена пустая свеча, пропускаем...")
                             continue
 
-                        figi = candle.candle.figi
+                        candle = response.candle
+                        figi = candle.figi
                         stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
                         stock = stock_result.scalars().first()
                         if not stock:
@@ -484,12 +486,12 @@ class TradingBot:
                             continue
 
                         ticker = stock.ticker
-                        current_price = candle.candle.close.units + candle.candle.close.nano / 1e9 if candle.candle.close else 0
+                        current_price = candle.close.units + candle.close.nano / 1e9 if candle.close else 0
                         candle_data = {
                             "close": current_price,
-                            "high": candle.candle.high.units + candle.candle.high.nano / 1e9 if candle.candle.high else current_price,
-                            "low": candle.candle.low.units + candle.candle.low.nano / 1e9 if candle.candle.low else current_price,
-                            "time": candle.candle.time
+                            "high": candle.high.units + candle.high.nano / 1e9 if candle.high else current_price,
+                            "low": candle.low.units + candle.low.nano / 1e9 if candle.low else current_price,
+                            "time": candle.time
                         }
 
                         if ticker not in self.historical_data:

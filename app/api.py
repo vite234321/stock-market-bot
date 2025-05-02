@@ -11,7 +11,7 @@ from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from tinkoff.invest import AsyncClient, InstrumentIdType
-from tinkoff.invest.exceptions import InvestError
+from tinkoff.invest.exceptions import RequestError
 import logging
 import os
 import asyncio
@@ -104,14 +104,14 @@ async def update_figi_for_all_stocks():
                             stock.set_figi_status(FigiStatus.SUCCESS)
                             session.add(stock)
                             logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
-                        except InvestError as e:
+                        except RequestError as e:
                             if "NOT_FOUND" in str(e):
                                 logger.error(f"Инструмент {stock.ticker} не найден в API")
                                 stock.set_figi_status(FigiStatus.FAILED)
                                 session.add(stock)
                                 continue
                             elif "RESOURCE_EXHAUSTED" in str(e):
-                                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                                reset_time = int(e.metadata.get('ratelimit_reset', 60)) if e.metadata.get('ratelimit_reset') else 60
                                 logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
                                 await asyncio.sleep(reset_time)
                                 response = await client.instruments.share_by(
