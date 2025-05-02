@@ -1,11 +1,7 @@
-# app/database.py
-import logging
-import asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 import os
+import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -13,60 +9,32 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL не установлен в переменных окружения")
 
-# Преобразуем postgres:// в postgresql+asyncpg://
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-logger.info("Строка подключения к базе данных: %s", DATABASE_URL)
-
-# Создаём движок SQLAlchemy с использованием пула подключений asyncpg
-logger.info("Создание движка SQLAlchemy с отключением кэша prepared statements...")
+# Создаём асинхронный движок с отключённым кэшем подготовленных запросов
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    connect_args={
-        "statement_cache_size": 0,  # Отключаем кэш prepared statements
-        "server_settings": {
-            "application_name": "stock-market-bot"
-        }
-    },
-    pool_size=5,  # Максимальное количество подключений в пуле
-    max_overflow=10,  # Максимальное количество дополнительных подключений
-    pool_timeout=30,  # Таймаут ожидания подключения
-    pool_pre_ping=True  # Проверка подключения перед использованием
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_pre_ping=True,
+    connect_args={"statement_cache_size": 0}  # Отключаем кэш подготовленных запросов
 )
-logger.info("Движок SQLAlchemy создан успешно.")
 
-# Создаём фабрику сессий
 async_session = async_sessionmaker(
     engine,
-    class_=AsyncSession,
-    expire_on_commit=False
+    expire_on_commit=False,
+    class_=AsyncSession
 )
 
-class Base(DeclarativeBase):
-    pass
-
-# Функция для инициализации базы данных (создание таблиц) с повторными попытками
 async def init_db():
-    for attempt in range(1, 10):  # 10 попыток
-        try:
-            logger.info("Попытка %d: подключение к базе данных...", attempt)
-            async with engine.begin() as conn:
-                logger.info("Соединение с базой данных успешно установлено.")
-                await conn.run_sync(Base.metadata.create_all)
-                logger.info("Таблицы успешно созданы или уже существуют.")
-                return
-        except Exception as e:
-            logger.error("Ошибка подключения к базе данных на попытке %d: %s", attempt, str(e))
-            if attempt == 9:
-                logger.error("Не удалось подключиться к базе данных после 10 попыток. Завершаем работу.")
-                raise
-            await asyncio.sleep(10)  # Задержка 10 секунд перед следующей попыткой
+    logger.info("Инициализация базы данных...")
+    async with engine.begin() as conn:
+        # Здесь можно добавить создание таблиц, если нужно
+        from app.models import Base
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("База данных успешно инициализирована.")
 
-# Функция для получения сессии базы данных
-async def get_db() -> AsyncSession:
-    async with async_session() as session:
-        yield session
+async def dispose_engine():
+    logger.info("Закрытие соединения с базой данных...")
+    await engine.dispose()
+    logger.info("Соединение с базой данных закрыто")
