@@ -28,6 +28,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен в переменных окружения")
 
+ADMIN_ID = os.getenv("ADMIN_ID")
+
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -35,11 +37,34 @@ bot = Bot(
 
 dp = Dispatcher()
 dp.include_router(router)
-# Передаём trading_bot в middleware
 trading_bot = TradingBot(bot)
 dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
 
+dp.startup_timeout = 60
+dp.shutdown_timeout = 60
+dp.retry_times = 5
+dp.retry_interval = 5
+
 scheduler = AsyncIOScheduler()
+
+async def notify_admin(message: str):
+    if ADMIN_ID:
+        try:
+            await bot.send_message(ADMIN_ID, message, parse_mode="HTML")
+            logger.info(f"Уведомление отправлено администратору: {message}")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление администратору: {e}")
+    else:
+        logger.warning("ADMIN_ID не установлен, уведомление не отправлено")
+
+@dp.errors()
+async def on_error(update, exception):
+    logger.error(f"Ошибка в диспетчере: {exception}")
+    if isinstance(exception, aiogram.exceptions.TelegramNetworkError):
+        tryings = getattr(exception, 'tryings', 0)
+        if tryings >= dp.retry_times:
+            error_message = f"⚠️ Превышено количество попыток подключения к Telegram API ({tryings}). Бот может работать нестабильно."
+            await notify_admin(error_message)
 
 async def update_figi_for_all_stocks():
     logger.info("Запуск обновления FIGI для всех акций")
@@ -54,7 +79,6 @@ async def update_figi_for_all_stocks():
                 return
 
             async with AsyncClient(user.tinkoff_token) as client:
-                # Обновляем акции со статусом PENDING или FAILED
                 stocks_result = await session.execute(
                     select(Stock).where(Stock.figi_status.in_([FigiStatus.PENDING.value, FigiStatus.FAILED.value]))
                 )
@@ -133,7 +157,7 @@ async def start_streaming_for_users():
             for user in users:
                 logger.info(f"Запуск стриминга для пользователя {user.user_id}")
                 task = asyncio.create_task(trading_bot.stream_and_trade(user.user_id))
-                trading_bot.stream_task = task
+                trading_bot.stream_tasks[user.user_id] = task
         except Exception as e:
             logger.error(f"Ошибка при запуске стриминга: {e}")
 

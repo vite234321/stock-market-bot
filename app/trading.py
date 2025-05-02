@@ -18,7 +18,6 @@ from sklearn.linear_model import LinearRegression
 import numpy as np
 from typing import Dict, List, Optional
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,10 +30,9 @@ class TradingBot:
         self.news_cache: Dict[str, List[Dict]] = {}
         self.historical_data: Dict[str, List] = {}
         self.running = False
-        self.stream_tasks: Dict[int, asyncio.Task] = {}  # Храним задачи по user_id
+        self.stream_tasks: Dict[int, asyncio.Task] = {}
 
     async def debug_available_shares(self, client: AsyncClient):
-        """Отладочная функция для вывода доступных акций."""
         try:
             response = await client.instruments.shares()
             for instrument in response.instruments:
@@ -44,7 +42,6 @@ class TradingBot:
             logger.error(f"Ошибка при получении списка акций: {e}")
 
     async def update_figi(self, client: AsyncClient, stock: Stock) -> Optional[str]:
-        """Проверяет наличие FIGI в базе. Если его нет, пытается обновить."""
         if stock.figi:
             return stock.figi
 
@@ -74,8 +71,7 @@ class TradingBot:
             return None
 
     async def fetch_news(self, ticker: str) -> List[Dict]:
-        """Получает новости по тикеру через NewsAPI."""
-        api_key = "YOUR_NEWSAPI_KEY"  # Замените на ваш ключ NewsAPI
+        api_key = "YOUR_NEWSAPI_KEY"
         if not api_key:
             logger.warning("NewsAPI ключ не установлен, новости не будут проверяться")
             return []
@@ -110,7 +106,6 @@ class TradingBot:
             return []
 
     def is_negative_news(self, articles: List[Dict]) -> bool:
-        """Проверяет, есть ли негативные новости."""
         if not articles:
             return False
         negative_keywords = {"падение", "кризис", "убытки", "снижение", "скандал", "санкции"}
@@ -123,7 +118,6 @@ class TradingBot:
         return False
 
     def calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
-        """Рассчитывает RSI (Relative Strength Index)."""
         if len(prices) < period + 1:
             logger.warning(f"Недостаточно данных для расчёта RSI: {len(prices)} элементов, требуется {period + 1}")
             return None
@@ -146,7 +140,6 @@ class TradingBot:
         return rsi
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
-        """Рассчитывает MACD и сигнальную линию."""
         required_length = slow_period + signal_period
         if len(prices) < required_length:
             logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices)} элементов, требуется {required_length}")
@@ -154,6 +147,7 @@ class TradingBot:
 
         def ema(data, period):
             if len(data) < period:
+                logger.warning(f"Недостаточно данных для EMA: {len(data)} элементов, требуется {period}")
                 return []
             ema_values = []
             k = 2 / (period + 1)
@@ -166,28 +160,23 @@ class TradingBot:
         ema_fast = ema(prices, fast_period)
         ema_slow = ema(prices, slow_period)
 
-        if len(ema_fast) < slow_period or len(ema_slow) < slow_period:
-            logger.warning(f"Недостаточно данных для EMA: ema_fast={len(ema_fast)}, ema_slow={len(ema_slow)}")
+        if not ema_fast or not ema_slow:
+            logger.warning("EMA не удалось рассчитать из-за недостатка данных")
             return None, None, None
 
         macd = [ema_fast[i] - ema_slow[i] for i in range(len(ema_fast))]
         signal = ema(macd, signal_period)
 
-        if len(signal) < signal_period:
-            logger.warning(f"Недостаточно данных для сигнальной линии MACD: {len(signal)} элементов, требуется {signal_period}")
+        if not signal:
+            logger.warning("Сигнальная линия MACD не может быть рассчитана")
             return None, None, None
 
         signal_idx = len(signal) - 1
         macd_idx = len(macd) - 1
-        if signal_idx < 0 or macd_idx < signal_period - 1:
-            logger.warning(f"Недостаточно данных для расчёта гистограммы MACD: signal_idx={signal_idx}, macd_idx={macd_idx}")
-            return None, None, None
-
         histogram = macd[macd_idx] - signal[signal_idx]
         return macd[macd_idx], signal[signal_idx], histogram
 
     def calculate_atr(self, candles: List, period: int = 14) -> Optional[float]:
-        """Рассчитывает ATR (Average True Range)."""
         if len(candles) < period + 1:
             logger.warning(f"Недостаточно данных для расчёта ATR: {len(candles)} элементов, требуется {period + 1}")
             return None
@@ -202,7 +191,6 @@ class TradingBot:
         return atr
 
     def calculate_bollinger_bands(self, prices: List[float], period: int = 20, std_dev: float = 2) -> tuple:
-        """Рассчитывает Bollinger Bands."""
         if len(prices) < period:
             logger.warning(f"Недостаточно данных для расчёта Bollinger Bands: {len(prices)} элементов, требуется {period}")
             return None, None, None
@@ -214,17 +202,14 @@ class TradingBot:
         return sma, upper_band, lower_band
 
     async def train_ml_model(self, ticker: str, client: AsyncClient, figi: str):
-        """Обучает модель ML для предсказания цены."""
-        required_candles = 60  # Минимальное количество свечей для обучения
+        required_candles = 60
         prices = []
 
-        # Проверяем, достаточно ли данных в historical_data
         if ticker in self.historical_data and len(self.historical_data[ticker]) >= required_candles:
             prices = [c["close"] for c in self.historical_data[ticker][-required_candles:]]
         else:
-            # Загружаем дополнительные данные через API Tinkoff
             end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=90)
+            start_date = end_date - timedelta(days=365)
             try:
                 candles = await client.market_data.get_candles(
                     figi=figi,
@@ -252,6 +237,7 @@ class TradingBot:
             rsi = self.calculate_rsi(window)
             macd, signal, _ = self.calculate_macd(window)
             if rsi is None or macd is None:
+                logger.warning(f"Не удалось рассчитать индикаторы для {ticker} на итерации {i}")
                 continue
             features = [window[-1], rsi, macd - signal]
             X.append(features)
@@ -267,7 +253,6 @@ class TradingBot:
         logger.info(f"ML модель обучена для {ticker}")
 
     def predict_price(self, ticker: str, prices: List[float]) -> Optional[float]:
-        """Предсказывает следующую цену с помощью ML модели."""
         if ticker not in self.ml_models or len(prices) < 30:
             logger.warning(f"Недостаточно данных для предсказания цены для {ticker}: {len(prices)} элементов")
             return None
@@ -282,9 +267,8 @@ class TradingBot:
         return predicted_price
 
     async def backtest_strategy(self, ticker: str, figi: str, client: AsyncClient) -> Dict:
-        """Тестирует стратегию на исторических данных."""
         end_date = datetime.utcnow()
-        start_date = end_date - timedelta(days=180)
+        start_date = end_date - timedelta(days=365)
         try:
             candles = await client.market_data.get_candles(
                 figi=figi,
@@ -297,8 +281,9 @@ class TradingBot:
             logger.error(f"Ошибка при получении свечей для бэктестинга {ticker}: {e}")
             return {"profit": 0, "trades": 0}
 
-        if len(prices) < 60:
-            logger.warning(f"Недостаточно данных для бэктестинга {ticker}: {len(prices)} свечей")
+        required_length = 60
+        if len(prices) < required_length:
+            logger.warning(f"Недостаточно данных для бэктестинга {ticker}: {len(prices)} свечей, требуется {required_length}")
             return {"profit": 0, "trades": 0}
 
         balance = 100000
@@ -311,7 +296,9 @@ class TradingBot:
             rsi = self.calculate_rsi(window)
             macd, signal, histogram = self.calculate_macd(window)
             sma, upper_band, lower_band = self.calculate_bollinger_bands(window)
+            
             if rsi is None or macd is None or sma is None:
+                logger.warning(f"Не удалось рассчитать индикаторы для {ticker} на итерации {i}")
                 continue
 
             current_price = prices[i]
@@ -335,7 +322,6 @@ class TradingBot:
         return {"profit": profit, "trades": total_trades}
 
     async def calculate_daily_profit(self, session: AsyncSession, user_id: int) -> Dict:
-        """Рассчитывает дневную прибыль для пользователя."""
         today = datetime.utcnow().date()
         start_of_day = datetime.combine(today, datetime.min.time())
         end_of_day = datetime.combine(today, datetime.max.time())
@@ -360,7 +346,6 @@ class TradingBot:
         }
 
     async def send_daily_profit_report(self, session: AsyncSession, user_id: int):
-        """Отправляет отчёт о дневной прибыли в 22:00."""
         stats = await self.calculate_daily_profit(session, user_id)
         today = datetime.utcnow().date()
         message = (
@@ -373,7 +358,6 @@ class TradingBot:
         await self.bot.send_message(user_id, message, parse_mode="HTML")
 
     async def stream_and_trade(self, user_id: int):
-        """Запускает стриминг свечей и торгует в реальном времени."""
         logger.info(f"Запуск стриминга и торговли для пользователя {user_id}")
         self.status = "Запуск стриминга"
         self.running = True
@@ -626,7 +610,6 @@ class TradingBot:
             raise
 
     def stop_streaming(self, user_id: int = None):
-        """Останавливает стриминг для конкретного пользователя или всех."""
         self.running = False
         self.status = "Остановлен"
         if user_id:
