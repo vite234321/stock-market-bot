@@ -30,7 +30,7 @@ class TradingBot:
         self.historical_data: Dict[str, List] = {}
         self.running = False
         self.stream_tasks: Dict[int, asyncio.Task] = {}
-        self.streaming_client = None  # Для хранения клиента стриминга
+        self.streaming_client = None
 
     async def debug_available_shares(self, client: AsyncClient):
         try:
@@ -146,7 +146,7 @@ class TradingBot:
         return rsi
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
-        required_length = max(fast_period, slow_period, signal_period)  # Минимальная длина для расчёта всех EMA
+        required_length = max(fast_period, slow_period, signal_period)
         if not prices or len(prices) < required_length:
             logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices) if prices else 0} элементов, требуется {required_length}")
             return None, None, None
@@ -157,16 +157,13 @@ class TradingBot:
                 return None
             ema_values = []
             k = 2 / (period + 1)
-            # Начальное значение EMA - простое среднее за period
             initial_ema = sum(data[:period]) / period
             ema_values.append(initial_ema)
-            # Вычисляем EMA для оставшихся значений
             for i in range(period, len(data)):
                 ema_value = data[i] * k + ema_values[-1] * (1 - k)
                 ema_values.append(ema_value)
             return ema_values
 
-        # Вычисляем EMA для быстрого и медленного периода
         ema_fast = ema(prices, fast_period)
         if ema_fast is None:
             logger.warning("Не удалось рассчитать EMA fast из-за недостатка данных")
@@ -177,7 +174,6 @@ class TradingBot:
             logger.warning("Не удалось рассчитать EMA slow из-за недостатка данных")
             return None, None, None
 
-        # Убедимся, что ema_fast и ema_slow имеют одинаковую длину
         min_length = min(len(ema_fast), len(ema_slow))
         if min_length == 0:
             logger.warning("EMA fast или slow пусты")
@@ -188,13 +184,11 @@ class TradingBot:
             logger.warning("MACD не удалось рассчитать: пустой список")
             return None, None, None
 
-        # Вычисляем сигнальную линию
         signal = ema(macd, signal_period)
         if signal is None:
             logger.warning("Сигнальная линия MACD не может быть рассчитана")
             return None, None, None
 
-        # Последние значения для MACD, сигнальной линии и гистограммы
         signal_idx = len(signal) - 1
         macd_idx = len(macd) - 1
         if signal_idx < 0 or macd_idx < 0:
@@ -392,7 +386,6 @@ class TradingBot:
         self.running = True
 
         try:
-            # Проверяем пользователя и токен
             async with async_session() as session:
                 user_result = await session.execute(
                     select(User).where(User.user_id == user_id)
@@ -415,7 +408,6 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
-                # Получаем список акций
                 async with async_session() as session:
                     all_stocks_result = await session.execute(
                         select(Stock).where(Stock.figi_status != 'FAILED')
@@ -465,7 +457,6 @@ class TradingBot:
                     ]
                 )
 
-                # Инициализируем клиента стриминга
                 self.streaming_client = client
                 async with async_session() as session:
                     async for response in client.market_data_stream.market_data_stream(subscribe_request):
@@ -511,7 +502,6 @@ class TradingBot:
                         positions = await client.operations.get_positions(account_id=account_id)
                         holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                        # Проверяем, достаточно ли данных для расчёта индикаторов
                         if ticker not in self.historical_data or not self.historical_data[ticker] or len(self.historical_data[ticker]) < 35:
                             logger.info(f"Недостаточно данных для {ticker}: {len(self.historical_data[ticker]) if self.historical_data.get(ticker) else 0} свечей, требуется 35. Ожидаем накопления данных...")
                             continue
@@ -525,7 +515,6 @@ class TradingBot:
                             }) for c in self.historical_data[ticker][-35:]
                         ]
 
-                        # Дополнительная проверка на длину списка candles
                         if not candles or len(candles) < 35:
                             logger.warning(f"Недостаточно свечей для расчёта индикаторов для {ticker}: {len(candles) if candles else 0} свечей, требуется 35")
                             continue
@@ -541,8 +530,7 @@ class TradingBot:
                             continue
 
                         buy_signal = False
-                        if (rsi is not None and macd is not None and signal is not None and sma is not None and predicted_price is not None and
-                            rsi < 30 and histogram > 0 and current_price < lower_band and predicted_price > current_price * 1.02):
+                        if (rsi < 30 and histogram > 0 and current_price < lower_band and predicted_price > current_price * 1.02):
                             buy_signal = True
                             logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price:.2f}")
 
@@ -598,11 +586,10 @@ class TradingBot:
                             position["stop_loss"] = max(position["stop_loss"], trailing_stop)
 
                             sell_signal = False
-                            if (rsi is not None and macd is not None and signal is not None and sma is not None and predicted_price is not None and
-                                (rsi > 70 and histogram < 0 and current_price > upper_band) or
-                                current_price >= position["take_profit"] or
-                                current_price <= position["stop_loss"] or
-                                predicted_price < current_price * 0.98):
+                            if (rsi > 70 and histogram < 0 and current_price > upper_band) or \
+                               current_price >= position["take_profit"] or \
+                               current_price <= position["stop_loss"] or \
+                               predicted_price < current_price * 0.98:
                                 sell_signal = True
                                 logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}, Predicted Price={predicted_price:.2f}")
 
@@ -648,10 +635,9 @@ class TradingBot:
         self.running = False
         self.status = "Остановлен"
         
-        # Закрываем стриминг, если он активен
         if self.streaming_client:
             try:
-                self.streaming_client.__aexit__(None, None, None)  # Закрываем контекстный менеджер
+                self.streaming_client.__aexit__(None, None, None)
                 logger.info("Клиент стриминга закрыт")
             except Exception as e:
                 logger.error(f"Ошибка при закрытии клиента стриминга: {e}")
