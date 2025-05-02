@@ -29,7 +29,10 @@ async_session = async_sessionmaker(
 async def init_db():
     logger.info("Инициализация базы данных...")
     async with engine.begin() as conn:
-        # Здесь можно добавить создание таблиц, если нужно
+        # Добавляем отладочную информацию
+        version = await conn.scalar("select pg_catalog.version()")
+        logger.info(f"Версия PostgreSQL: {version}")
+        # Создание таблиц
         from app.models import Base
         await conn.run_sync(Base.metadata.create_all)
     logger.info("База данных успешно инициализирована.")

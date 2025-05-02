@@ -146,7 +146,7 @@ class TradingBot:
         return rsi
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
-        required_length = slow_period + signal_period - 1  # Учитываем, что signal требует дополнительных данных
+        required_length = max(fast_period, slow_period, signal_period)  # Минимальная длина для расчёта всех EMA
         if not prices or len(prices) < required_length:
             logger.warning(f"Недостаточно данных для расчёта MACD: {len(prices) if prices else 0} элементов, требуется {required_length}")
             return None, None, None
