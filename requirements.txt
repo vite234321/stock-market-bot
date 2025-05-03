@@ -4,7 +4,7 @@ aiogram==3.4.1
 sqlalchemy[asyncio]==2.0.35
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
-tinkoff-investments==0.6.8
+tinkoff-investments==0.2.0b111
 apscheduler==3.10.4
 httpx==0.27.2
 scikit-learn==1.5.2
