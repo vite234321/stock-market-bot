@@ -124,7 +124,7 @@ class TradingBot:
                 return True
         return False
 
-    def calculate_rsi(self, prices: List[float], period: int = 14) -> Optional[float]:
+    def calculate_rsi(self, prices: List[float], period: int = 10) -> Optional[float]:
         if not prices or len(prices) < period + 1:
             logger.debug(f"Недостаточно данных для расчёта RSI: {len(prices) if prices else 0} элементов, требуется {period + 1}")
             return None
@@ -143,6 +143,10 @@ class TradingBot:
             return None
         avg_gain = sum(gains[-period:]) / period if gains else 0
         avg_loss = sum(losses[-period:]) / period if losses else 0
+        logger.debug(f"RSI для {prices[:5]}...: avg_gain={avg_gain}, avg_loss={avg_loss}")
+        if avg_gain == 0 and avg_loss == 0:
+            logger.debug(f"RSI: Нет волатильности в ценах, возвращаем None")
+            return None
         if avg_loss == 0:
             logger.debug("RSI: avg_loss = 0, возвращаем 100")
             return 100
@@ -150,7 +154,7 @@ class TradingBot:
         rsi = 100 - (100 / (1 + rs))
         return rsi
 
-    def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
+    def calculate_macd(self, prices: List[float], fast_period: int = 8, slow_period: int = 21, signal_period: int = 5) -> tuple:
         required_length = max(fast_period, slow_period, signal_period) + 1
         if not prices or len(prices) < required_length:
             logger.debug(f"Недостаточно данных для расчёта MACD: {len(prices) if prices else 0} элементов, требуется {required_length}")
@@ -201,6 +205,7 @@ class TradingBot:
             return None, None, None
 
         histogram = macd[macd_idx] - signal[signal_idx]
+        logger.debug(f"MACD для {prices[:5]}...: macd={macd[macd_idx]}, signal={signal[signal_idx]}, histogram={histogram}")
         return macd[macd_idx], signal[signal_idx], histogram
 
     def calculate_atr(self, candles: List, period: int = 14) -> Optional[float]:
@@ -229,7 +234,7 @@ class TradingBot:
         return sma, upper_band, lower_band
 
     async def train_ml_model(self, ticker: str, client: AsyncClient, figi: str):
-        required_candles = 40  # Уменьшено с 50 для большей гибкости
+        required_candles = 30  # Уменьшено с 40
         prices = []
 
         if ticker in self.historical_data and len(self.historical_data[ticker]) >= required_candles:
@@ -255,8 +260,9 @@ class TradingBot:
                     logger.warning(f"Некорректные или отсутствующие цены для {ticker}: {prices[:10] if prices else []}...")
                     return
                 # Проверка на дубликаты цен
-                if len(set(prices)) < len(prices) * 0.5:
-                    logger.warning(f"Слишком много одинаковых цен для {ticker}: {prices[:10] if prices else []}...")
+                unique_prices = len(set(prices))
+                if unique_prices < len(prices) * 0.3:  # Уменьшен порог с 0.5 до 0.3
+                    logger.warning(f"Слишком много одинаковых цен для {ticker}: {unique_prices} уникальных из {len(prices)}, {prices[:10]}...")
                     return
                 self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles)]
                 logger.info(f"Загружено {len(prices)} свечей для {ticker} из Tinkoff API")
@@ -268,16 +274,17 @@ class TradingBot:
             logger.warning(f"Недостаточно данных для обучения ML модели для {ticker}: {len(prices) if prices else 0} свечей, требуется {required_candles}")
             return
 
-        # Логирование первых цен для диагностики
+        # Логирование первых цен и статистики
         logger.debug(f"Первые 10 цен для {ticker}: {prices[:10]}")
+        logger.debug(f"Статистика цен для {ticker}: min={min(prices) if prices else 0}, max={max(prices) if prices else 0}, unique={len(set(prices))}")
 
         X = []
         y = []
-        min_features = 3  # Уменьшено с 5 для большей гибкости
-        for i in range(20, len(prices) - 1):  # Уменьшено окно с 30 до 20
-            window = prices[i-20:i]
-            rsi = self.calculate_rsi(window, period=10)  # Уменьшен период RSI
-            macd, signal, _ = self.calculate_macd(window, fast_period=8, slow_period=21, signal_period=5)  # Уменьшены периоды MACD
+        min_features = 2  # Уменьшено с 3
+        for i in range(15, len(prices) - 1):  # Уменьшено окно с 20 до 15
+            window = prices[i-15:i]
+            rsi = self.calculate_rsi(window, period=7)  # Уменьшен период с 10 до 7
+            macd, signal, _ = self.calculate_macd(window, fast_period=6, slow_period=13, signal_period=4)  # Уменьшены периоды
             if rsi is None:
                 logger.debug(f"RSI не рассчитан для {ticker} на итерации {i}: window={window[:5]}...")
                 continue
@@ -302,12 +309,12 @@ class TradingBot:
             return
 
     def predict_price(self, ticker: str, prices: List[float]) -> Optional[float]:
-        if not prices or ticker not in self.ml_models or len(prices) < 20:
+        if not prices or ticker not in self.ml_models or len(prices) < 15:
             logger.debug(f"Недостаточно данных для предсказания цены для {ticker}: {len(prices) if prices else 0} элементов")
             return None
-        window = prices[-20:]
-        rsi = self.calculate_rsi(window, period=10)
-        macd, signal, _ = self.calculate_macd(window, fast_period=8, slow_period=21, signal_period=5)
+        window = prices[-15:]
+        rsi = self.calculate_rsi(window, period=7)
+        macd, signal, _ = self.calculate_macd(window, fast_period=6, slow_period=13, signal_period=4)
         if rsi is None or macd is None or signal is None:
             logger.debug(f"Не удалось рассчитать индикаторы для предсказания цены для {ticker}")
             return None
@@ -334,7 +341,7 @@ class TradingBot:
             logger.error(f"Ошибка при получении свечей для бэктестинга {ticker}: {e}")
             return {"profit": 0, "trades": 0}
 
-        required_length = 50  # Уменьшено с 60
+        required_length = 40  # Уменьшено с 50
         if not prices or len(prices) < required_length:
             logger.warning(f"Недостаточно данных для бэктестинга {ticker}: {len(prices) if prices else 0} свечей, требуется {required_length}")
             return {"profit": 0, "trades": 0}
@@ -344,10 +351,10 @@ class TradingBot:
         total_trades = 0
         entry_price = 0
 
-        for i in range(25, len(prices)):  # Уменьшено окно с 35 до 25
-            window = prices[i-25:i]
-            rsi = self.calculate_rsi(window, period=10)
-            macd, signal, histogram = self.calculate_macd(window, fast_period=8, slow_period=21, signal_period=5)
+        for i in range(20, len(prices)):  # Уменьшено окно с 25 до 20
+            window = prices[i-20:i]
+            rsi = self.calculate_rsi(window, period=7)
+            macd, signal, histogram = self.calculate_macd(window, fast_period=6, slow_period=13, signal_period=4)
             sma, upper_band, lower_band = self.calculate_bollinger_bands(window)
             
             if rsi is None or macd is None or signal is None or sma is None:
@@ -470,8 +477,8 @@ class TradingBot:
                                 interval=CandleInterval.CANDLE_INTERVAL_DAY
                             )
                             candles = candles_response.candles
-                            if not candles or len(candles) < 25:
-                                logger.warning(f"Недостаточно свечей для {stock.ticker}: {len(candles)} свечей, требуется 25")
+                            if not candles or len(candles) < 20:
+                                logger.warning(f"Недостаточно свечей для {stock.ticker}: {len(candles)} свечей, требуется 20")
                                 continue
                             if stock.ticker not in self.historical_data:
                                 self.historical_data[stock.ticker] = []
@@ -489,8 +496,14 @@ class TradingBot:
                             continue
 
                         backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
-                        if backtest_result["profit"] < -10:  # Смягчено условие
+                        if backtest_result["profit"] < -5:  # Увеличен порог с -10 до -5
                             logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
+                            continue
+
+                        # Пропуск ML-обучения для тикеров с высокой прибылью
+                        if backtest_result["profit"] > 50:
+                            logger.info(f"Пропущено обучение ML для {stock.ticker} из-за высокой прибыли: {backtest_result['profit']}")
+                            figis_to_subscribe.append(figi)
                             continue
 
                         await self.train_ml_model(stock.ticker, client, figi)
@@ -567,37 +580,37 @@ class TradingBot:
                         positions = await client.operations.get_positions(account_id=account_id)
                         holdings = {pos.figi: pos.quantity.units for pos in positions.securities}
 
-                        if ticker not in self.historical_data or not self.historical_data[ticker] or len(self.historical_data[ticker]) < 25:
-                            logger.debug(f"Недостаточно данных для {ticker}: {len(self.historical_data[ticker]) if self.historical_data.get(ticker) else 0} свечей, требуется 25")
+                        if ticker not in self.historical_data or not self.historical_data[ticker] or len(self.historical_data[ticker]) < 20:
+                            logger.debug(f"Недостаточно данных для {ticker}: {len(self.historical_data[ticker]) if self.historical_data.get(ticker) else 0} свечей, требуется 20")
                             continue
 
-                        prices = [c["close"] for c in self.historical_data[ticker][-25:]] if self.historical_data[ticker] else []
+                        prices = [c["close"] for c in self.historical_data[ticker][-20:]] if self.historical_data[ticker] else []
                         candles = [
                             type('Candle', (), {
                                 "close": type('Price', (), {"units": int(c["close"]), "nano": int((c["close"] % 1) * 1e9)}),
                                 "high": type('Price', (), {"units": int(c["high"]), "nano": int((c["high"] % 1) * 1e9)}),
                                 "low": type('Price', (), {"units": int(c["low"]), "nano": int((c["low"] % 1) * 1e9)})
-                            }) for c in self.historical_data[ticker][-25:]
+                            }) for c in self.historical_data[ticker][-20:]
                         ]
 
-                        if not candles or len(candles) < 25:
-                            logger.debug(f"Недостаточно свечей для расчёта индикаторов для {ticker}: {len(candles) if candles else 0} свечей, требуется 25")
+                        if not candles or len(candles) < 20:
+                            logger.debug(f"Недостаточно свечей для расчёта индикаторов для {ticker}: {len(candles) if candles else 0} свечей, требуется 20")
                             continue
 
-                        rsi = self.calculate_rsi(prices, period=10)
-                        macd, signal, histogram = self.calculate_macd(prices, fast_period=8, slow_period=21, signal_period=5)
+                        rsi = self.calculate_rsi(prices, period=7)
+                        macd, signal, histogram = self.calculate_macd(prices, fast_period=6, slow_period=13, signal_period=4)
                         atr = self.calculate_atr(candles)
                         sma, upper_band, lower_band = self.calculate_bollinger_bands(prices)
-                        predicted_price = self.predict_price(ticker, prices)
+                        predicted_price = self.predict_price(ticker, prices) if ticker in self.ml_models else None
 
-                        if any(x is None for x in [rsi, macd, signal, atr, sma, predicted_price]):
-                            logger.debug(f"Невозможно рассчитать индикаторы или предсказание для {ticker}")
+                        if any(x is None for x in [rsi, macd, signal, atr, sma]):
+                            logger.debug(f"Невозможно рассчитать индикаторы для {ticker}")
                             continue
 
                         buy_signal = False
-                        if (rsi < 30 and histogram > 0 and current_price < lower_band and predicted_price > current_price * 1.02):
+                        if (rsi < 30 and histogram > 0 and current_price < lower_band and (predicted_price is None or predicted_price > current_price * 1.02)):
                             buy_signal = True
-                            logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price:.2f}")
+                            logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}, Predicted Price={predicted_price if predicted_price else 'N/A'}")
 
                         if buy_signal:
                             max_position_cost = total_balance * 0.1
@@ -654,9 +667,9 @@ class TradingBot:
                             if (rsi > 70 and histogram < 0 and current_price > upper_band) or \
                                current_price >= position["take_profit"] or \
                                current_price <= position["stop_loss"] or \
-                               predicted_price < current_price * 0.98:
+                               (predicted_price is not None and predicted_price < current_price * 0.98):
                                 sell_signal = True
-                                logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}, Predicted Price={predicted_price:.2f}")
+                                logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}, Predicted Price={predicted_price if predicted_price else 'N/A'}")
 
                             if sell_signal:
                                 quantity = min(available_to_sell, 10)
