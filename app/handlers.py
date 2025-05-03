@@ -7,10 +7,10 @@ from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
 try:
-    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
+    from tinkoff.investments import AsyncClient, CandleInterval, InstrumentIdType
 except ImportError as e:
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
-from tinkoff.invest.exceptions import InvestError
+    raise ImportError("Ошибка импорта tinkoff.investments. Убедитесь, что tinkoff-investments установлен в requirements.txt.") from e
+from tinkoff.investments.exceptions import InvestError
 import matplotlib.pyplot as plt
 import os
 import asyncio
