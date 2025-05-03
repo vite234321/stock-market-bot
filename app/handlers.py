@@ -1,4 +1,3 @@
-# app/handlers.py
 from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
@@ -7,8 +6,11 @@ import logging
 from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
-from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
-from tinkoff.invest.exceptions import InvestError  # Заменяем TinkoffInvestError на InvestError
+try:
+    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
+except ImportError as e:
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
+from tinkoff.invest.exceptions import InvestError
 import matplotlib.pyplot as plt
 import os
 import asyncio
@@ -19,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Главное меню
+# [Остальной код handlers.py остается без изменений]
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📈 Акции", callback_data="stocks_menu")],
@@ -28,7 +30,6 @@ def get_main_menu():
     ])
     return keyboard
 
-# Меню акций
 def get_stocks_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks"),
@@ -41,7 +42,6 @@ def get_stocks_menu():
     ])
     return keyboard
 
-# Меню торговли
 def get_trading_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤖 Автоторговля", callback_data="autotrading_menu"),
@@ -52,7 +52,6 @@ def get_trading_menu():
     ])
     return keyboard
 
-# Меню настроек
 def get_settings_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔑 Установить токен", callback_data="set_token")],
@@ -60,7 +59,6 @@ def get_settings_menu():
     ])
     return keyboard
 
-# Меню автоторговли
 def get_autotrading_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Профиль", callback_data="view_profile")],
@@ -192,12 +190,11 @@ async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession):
         await session.commit()
         logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
         return stock.figi
-    except InvestError as e:  # Заменяем TinkoffInvestError на InvestError
+    except InvestError as e:
         if "RESOURCE_EXHAUSTED" in str(e):
             reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
             logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
             await asyncio.sleep(reset_time)
-            # Повторяем запрос после ожидания
             response = await client.instruments.share_by(
                 id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
                 class_code="TQBR",
@@ -230,7 +227,6 @@ async def generate_price_chart(message: Message, session: AsyncSession):
             await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
             return
 
-        # Находим акцию в базе
         stock_result = await session.execute(
             select(Stock).where(Stock.ticker == ticker)
         )
@@ -240,7 +236,6 @@ async def generate_price_chart(message: Message, session: AsyncSession):
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
-            # Проверяем наличие FIGI
             figi = stock.figi
             if not figi:
                 logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
@@ -249,7 +244,6 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                     await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.")
                     return
 
-            # Получаем свечи за последние 30 дней
             end_date = datetime.utcnow()
             start_date = end_date - timedelta(days=30)
             candles = await client.market_data.get_candles(
@@ -263,11 +257,9 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                 await message.answer(f"Данные для {ticker} не найдены.")
                 return
 
-            # Извлекаем данные для графика
             dates = [candle.time for candle in candles.candles]
             prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
 
-            # Генерируем график
             plt.figure(figsize=(10, 5))
             plt.plot(dates, prices, marker='o', linestyle='-', color='b')
             plt.title(f"График цены {ticker} (30 дней)")
@@ -277,16 +269,13 @@ async def generate_price_chart(message: Message, session: AsyncSession):
             plt.xticks(rotation=45)
             plt.tight_layout()
 
-            # Сохраняем график во временный файл
             chart_path = f"chart_{user_id}_{ticker}.png"
             plt.savefig(chart_path)
             plt.close()
 
-            # Отправляем график в Telegram
             chart_file = FSInputFile(chart_path)
             await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
 
-            # Удаляем временный файл
             os.remove(chart_path)
     except Exception as e:
         logger.error(f"Ошибка при построении графика для {ticker}: {e}")
@@ -355,7 +344,6 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
         )
         subscribed_tickers = result.scalars().all()
 
-        # Получаем статистику
         total_trades_result = await session.execute(
             select(func.count(TradeHistory.id)).where(TradeHistory.user_id == user_id)
         )
@@ -373,7 +361,6 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
 
         profit = total_sell - total_buy
 
-        # Получаем баланс через T-Invest API
         async with AsyncClient(user.tinkoff_token) as client:
             accounts = await client.users.get_accounts()
             if not accounts.accounts:
@@ -421,15 +408,11 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         user.autotrading_enabled = True
         await session.commit()
 
-        # Останавливаем существующий стрим, если он есть
         trading_bot.stop_streaming(user_id)
-
-        # Запускаем новый стрим
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
 
         await callback_query.message.answer("▶️ Автоторговля включена!", reply_markup=get_autotrading_menu())
-        # Отправляем уведомление
         await callback_query.message.answer("🤖 Бот начал анализ рынка и поиск возможностей для торговли.")
     except Exception as e:
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {e}")
@@ -451,11 +434,9 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
         user.autotrading_enabled = False
         await session.commit()
 
-        # Останавливаем стрим для пользователя
         trading_bot.stop_streaming(user_id)
 
         await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
-        # Отправляем уведомление
         await callback_query.message.answer("🤖 Бот прекратил торговлю.")
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")

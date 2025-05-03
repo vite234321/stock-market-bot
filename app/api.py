@@ -10,7 +10,10 @@ from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from tinkoff.invest import AsyncClient, InstrumentIdType
+try:
+    from tinkoff.invest import AsyncClient, InstrumentIdType
+except ImportError as e:
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
 from tinkoff.invest.exceptions import RequestError
 import logging
 import os
