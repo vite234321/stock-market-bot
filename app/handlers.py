@@ -14,6 +14,7 @@ from tinkoff.invest.exceptions import InvestError
 import matplotlib.pyplot as plt
 import os
 import asyncio
+import html
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -451,15 +452,15 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {str(e)}")
         error_message = "❌ Ошибка при включении автоторговли: "
         if "Нет подходящих тикеров" in str(e):
-            error_message += "Нет подходящих акций для торговли. Попробуйте добавить другие тикеры или проверьте настройки."
+            error_message += "Нет подходящих акций для торговли. Попробуйте добавить другие тикеры."
         elif "Токен T-Invest API не найден" in str(e):
             error_message += "Токен T-Invest API не установлен."
         elif "Instrument not found" in str(e):
             error_message += "Некоторые тикеры недоступны. Проверьте базу акций."
         elif "Недостаточно данных для обучения ML" in str(e):
-            error_message += "Недостаточно данных для обучения модели. Попробуйте позже."
+            error_message += "Недостаточно данных для обучения модели."
         else:
-            error_message += f"Неизвестная ошибка: {str(e)}. Попробуйте снова позже."
+            error_message += f"Неизвестная ошибка: {html.escape(str(e))}."
         await callback_query.message.answer(
             error_message,
             reply_markup=get_autotrading_menu()

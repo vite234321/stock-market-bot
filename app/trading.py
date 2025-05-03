@@ -2,6 +2,7 @@ import logging
 import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from app.models import Stock, Subscription, TradeHistory, User, FigiStatus
 from app.database import async_session
 from datetime import datetime, timedelta
@@ -359,7 +360,7 @@ class TradingBot:
                 continue
 
             current_price = prices[i]
-            if rsi < 35 and histogram > 0 and current_price < lower_band:  # Смягчено RSI с 30 до 35
+            if rsi < 35 and histogram > 0 and current_price < lower_band:
                 quantity = min(int(balance // current_price), 10)
                 if quantity > 0:
                     cost = quantity * current_price
@@ -368,7 +369,7 @@ class TradingBot:
                     entry_price = current_price
                     total_trades += 1
 
-            elif position > 0 and (rsi > 65 or current_price > upper_band or (current_price < entry_price * 0.95)):  # Смягчено RSI с 70 до 65
+            elif position > 0 and (rsi > 65 or current_price > upper_band or (current_price < entry_price * 0.95)):
                 revenue = position * current_price
                 balance += revenue
                 position = 0
@@ -383,14 +384,18 @@ class TradingBot:
         start_of_day = datetime.combine(today, datetime.min.time())
         end_of_day = datetime.combine(today, datetime.max.time())
 
-        result = await session.execute(
-            select(TradeHistory).where(
-                TradeHistory.user_id == user_id,
-                TradeHistory.created_at >= start_of_day,
-                TradeHistory.created_at <= end_of_day
+        try:
+            result = await session.execute(
+                select(TradeHistory).where(
+                    TradeHistory.user_id == user_id,
+                    TradeHistory.created_at >= start_of_day,
+                    TradeHistory.created_at <= end_of_day
+                )
             )
-        )
-        trades = result.scalars().all()
+            trades = result.scalars().all()
+        except DBAPIError as e:
+            logger.error(f"Ошибка SQL при получении торговой истории для пользователя {user_id}: {e}")
+            return {"total_trades": 0, "total_buy": 0, "total_sell": 0, "profit": 0}
 
         total_buy = sum(trade.total for trade in trades if trade.action == "buy")
         total_sell = sum(trade.total for trade in trades if trade.action == "sell")
@@ -421,11 +426,28 @@ class TradingBot:
 
         try:
             async with async_session() as session:
-                user_result = await session.execute(
-                    select(User).where(User.user_id == user_id)
-                )
-                user = user_result.scalars().first()
-                if not user or not user.tinkoff_token:
+                try:
+                    user_result = await session.execute(
+                        select(User).where(User.user_id == user_id)
+                    )
+                    user = user_result.scalars().first()
+                    if not user:
+                        logger.error(f"Пользователь {user_id} не найден в базе данных")
+                        self.status = "Ошибка: пользователь не найден"
+                        await self.bot.send_message(user_id, "❌ Ошибка: Ваш профиль не найден. Установите токен T-Invest API.")
+                        return
+                except DBAPIError as e:
+                    logger.error(f"Ошибка SQL при получении пользователя {user_id}: {e}, SQL: {str(select(User).where(User.user_id == user_id))}")
+                    self.status = "Ошибка: проблема с базой данных"
+                    await self.bot.send_message(user_id, "❌ Ошибка: Не удалось подключиться к базе данных. Попробуйте позже.")
+                    return
+                except Exception as e:
+                    logger.error(f"Неожиданная ошибка при получении пользователя {user_id}: {e}")
+                    self.status = "Ошибка: неизвестная проблема"
+                    await self.bot.send_message(user_id, "❌ Ошибка: Неизвестная проблема с базой данных. Попробуйте позже.")
+                    return
+
+                if not user.tinkoff_token:
                     logger.error(f"Токен T-Invest API не найден для пользователя {user_id}")
                     self.status = "Ошибка: токен не найден"
                     await self.bot.send_message(user_id, "❌ Токен T-Invest API не найден. Установите его в меню настроек.")
@@ -443,10 +465,16 @@ class TradingBot:
                 account_id = accounts.accounts[0].id
 
                 async with async_session() as session:
-                    all_stocks_result = await session.execute(
-                        select(Stock).where(Stock.figi_status != 'FAILED')
-                    )
-                    all_stocks = all_stocks_result.scalars().all()
+                    try:
+                        all_stocks_result = await session.execute(
+                            select(Stock).where(Stock.figi_status != 'FAILED')
+                        )
+                        all_stocks = all_stocks_result.scalars().all()
+                    except DBAPIError as e:
+                        logger.error(f"Ошибка SQL при получении списка акций: {e}, SQL: {str(select(Stock).where(Stock.figi_status != 'FAILED'))}")
+                        self.status = "Ошибка: проблема с базой данных"
+                        await self.bot.send_message(user_id, "❌ Ошибка: Не удалось получить список акций из базы данных.")
+                        return
 
                 if not all_stocks:
                     logger.info("Нет доступных акций для торговли")
@@ -459,7 +487,11 @@ class TradingBot:
                     for stock in all_stocks:
                         figi = stock.figi
                         if not figi:
-                            figi = await self.update_figi(client, stock, session)
+                            try:
+                                figi = await self.update_figi(client, stock, session)
+                            except DBAPIError as e:
+                                logger.error(f"Ошибка SQL при обновлении FIGI для {stock.ticker}: {e}")
+                                continue
                             if not figi:
                                 logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
                                 continue
@@ -497,7 +529,6 @@ class TradingBot:
                             logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
                             continue
 
-                        # Временно пропускаем ML-обучение для всех тикеров
                         logger.info(f"Пропущено обучение ML для {stock.ticker} (прибыль: {backtest_result['profit']})")
                         figis_to_subscribe.append(figi)
 
@@ -532,8 +563,13 @@ class TradingBot:
 
                         candle = response.candle
                         figi = candle.figi
-                        stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
-                        stock = stock_result.scalars().first()
+                        try:
+                            stock_result = await session.execute(select(Stock).where(Stock.figi == figi))
+                            stock = stock_result.scalars().first()
+                        except DBAPIError as e:
+                            logger.error(f"Ошибка SQL при получении акции с FIGI {figi}: {e}, SQL: {str(select(Stock).where(Stock.figi == figi))}")
+                            continue
+
                         if not stock:
                             logger.warning(f"Акция с FIGI {figi} не найдена в базе")
                             continue
@@ -596,7 +632,7 @@ class TradingBot:
                             logger.debug(f"Невозможно рассчитать индикаторы для {ticker}")
                             continue
 
-                        buy_signal = rsi < 35 and histogram > 0 and current_price < lower_band  # Убрано predicted_price
+                        buy_signal = rsi < 35 and histogram > 0 and current_price < lower_band
                         if buy_signal:
                             logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}")
 
@@ -627,8 +663,12 @@ class TradingBot:
                                     total=total_cost,
                                     created_at=datetime.utcnow()
                                 )
-                                session.add(trade)
-                                await session.commit()
+                                try:
+                                    session.add(trade)
+                                    await session.commit()
+                                except DBAPIError as e:
+                                    logger.error(f"Ошибка SQL при сохранении торговой записи для {ticker}: {e}")
+                                    continue
 
                                 atr_multiplier = 2
                                 stop_loss = current_price - (atr * atr_multiplier if atr else 0)
@@ -651,7 +691,7 @@ class TradingBot:
                             trailing_stop = highest_price - (atr * 2 if atr else 0)
                             position["stop_loss"] = max(position["stop_loss"], trailing_stop)
 
-                            sell_signal = (rsi > 65 or current_price > upper_band or current_price <= position["stop_loss"])  # Убрано predicted_price
+                            sell_signal = (rsi > 65 or current_price > upper_band or current_price <= position["stop_loss"])
                             if sell_signal:
                                 logger.info(f"Сигнал на продажу {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Upper={upper_band:.2f}")
 
@@ -677,8 +717,13 @@ class TradingBot:
                                     total=total_revenue,
                                     created_at=datetime.utcnow()
                                 )
-                                session.add(trade)
-                                await session.commit()
+                                try:
+                                    session.add(trade)
+                                    await session.commit()
+                                except DBAPIError as e:
+                                    logger.error(f"Ошибка SQL при сохранении торговой записи для {ticker}: {e}")
+                                    continue
+
                                 if quantity == position["quantity"]:
                                     del self.positions[figi]
                                 else:

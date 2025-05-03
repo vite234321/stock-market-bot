@@ -9,6 +9,8 @@ from app.database import init_db, async_session, engine, dispose_engine
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
+from sqlalchemy.sql import text
+from sqlalchemy.exc import DBAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 try:
     from tinkoff.invest import AsyncClient, InstrumentIdType
@@ -50,184 +52,160 @@ dp.retry_interval = 10
 scheduler = AsyncIOScheduler()
 
 async def notify_admin(message: str):
+    """Отправка уведомления администратору."""
     if ADMIN_ID:
         try:
             await bot.send_message(ADMIN_ID, message, parse_mode="HTML")
-            logger.info(f"Уведомление отправлено администратору: {message}")
+            logger.info(f"Уведомление отправлено администратору: {message[:50]}...")
         except Exception as e:
-            logger.error(f"Не удалось отправить уведомление администратору: {e}")
-    else:
-        logger.warning("ADMIN_ID не установлен, уведомление не отправлено")
+            logger.error(f"Ошибка при отправке уведомления администратору: {e}")
 
-@dp.errors()
-async def on_error(update, exception):
-    logger.error(f"Ошибка в диспетчере: {exception}")
-    if isinstance(exception, aiogram.exceptions.TelegramNetworkError):
-        tryings = getattr(exception, 'tryings', 0)
-        if tryings >= dp.retry_times:
-            error_message = f"⚠️ Превышено количество попыток подключения к Telegram API ({tryings}). Бот может работать нестабильно."
-            await notify_admin(error_message)
+async def check_database_health():
+    """Проверка состояния базы данных при запуске."""
+    logger.info("Проверка состояния базы данных...")
+    try:
+        async with async_session() as session:
+            # Проверка подключения
+            await session.execute(text("SELECT 1"))
+            logger.info("Подключение к базе данных успешно.")
 
-async def update_figi_for_all_stocks():
-    logger.info("Запуск обновления FIGI для всех акций")
-    async with async_session() as session:
-        try:
-            user_result = await session.execute(
-                select(User).where(User.tinkoff_token != None).limit(1)
-            )
-            user = user_result.scalars().first()
-            if not user:
-                logger.warning("Не найден пользователь с токеном Tinkoff API для обновления FIGI")
-                return
+            # Проверка наличия таблицы User
+            user_count = await session.execute(select(func.count()).select_from(User))
+            logger.info(f"Найдено пользователей: {user_count.scalar()}")
 
-            async with AsyncClient(user.tinkoff_token) as client:
-                stocks_result = await session.execute(
-                    select(Stock).where(Stock.figi_status.in_([FigiStatus.PENDING.value, FigiStatus.FAILED.value]))
-                )
-                stocks = stocks_result.scalars().all()
-                if not stocks:
-                    logger.info("Все акции уже имеют FIGI")
-                    return
+            # Проверка наличия акций
+            stock_count = await session.execute(select(func.count()).select_from(Stock))
+            stock_count_value = stock_count.scalar()
+            logger.info(f"Найдено акций: {stock_count_value}")
 
-                batch_size = 10
-                for i in range(0, len(stocks), batch_size):
-                    batch = stocks[i:i + batch_size]
-                    for stock in batch:
-                        original_ticker = stock.ticker
-                        cleaned_ticker = original_ticker.replace('.ME', '')
-                        if original_ticker != cleaned_ticker:
-                            # Проверяем, существует ли cleaned_ticker
-                            existing_ticker = await session.execute(
-                                select(Stock).where(Stock.ticker == cleaned_ticker)
-                            )
-                            if existing_ticker.scalars().first():
-                                logger.warning(f"Тикер {cleaned_ticker} уже существует, пропускаем обновление для {original_ticker}")
-                                stock.set_figi_status(FigiStatus.FAILED)
-                                session.add(stock)
-                                continue
-                            stock.ticker = cleaned_ticker
-                            logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
-                            session.add(stock)
-                        try:
-                            response = await client.instruments.share_by(
-                                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                                class_code="TQBR",
-                                id=stock.ticker
-                            )
-                            stock.figi = response.instrument.figi
-                            stock.set_figi_status(FigiStatus.SUCCESS)
-                            session.add(stock)
-                            logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
-                        except RequestError as e:
-                            if "NOT_FOUND" in str(e):
-                                logger.error(f"Инструмент {stock.ticker} не найден в API")
-                                stock.set_figi_status(FigiStatus.FAILED)
-                                session.add(stock)
-                                continue
-                            elif "RESOURCE_EXHAUSTED" in str(e):
-                                reset_time = int(e.metadata.get('ratelimit_reset', 60)) if e.metadata.get('ratelimit_reset') else 60
-                                logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
-                                await asyncio.sleep(reset_time)
-                                response = await client.instruments.share_by(
-                                    id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                                    class_code="TQBR",
-                                    id=stock.ticker
-                                )
-                                stock.figi = response.instrument.figi
-                                stock.set_figi_status(FigiStatus.SUCCESS)
-                                session.add(stock)
-                                logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
-                            else:
-                                logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                                stock.set_figi_status(FigiStatus.FAILED)
-                                session.add(stock)
-                                continue
-                        except Exception as e:
-                            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-                            stock.set_figi_status(FigiStatus.FAILED)
-                            session.add(stock)
-                            continue
-                        await asyncio.sleep(0.5)
-                    await asyncio.sleep(5)
+            # Если акций нет, добавляем тестовые акции
+            if stock_count_value == 0:
+                logger.warning("Акции отсутствуют в базе, добавляем тестовые акции...")
+                test_stocks = [
+                    Stock(ticker="GCHE.ME", name="Группа Черкизово", last_price=0.0, figi_status=FigiStatus.PENDING),
+                    Stock(ticker="GAZA.ME", name="ГАЗ", last_price=0.0, figi_status=FigiStatus.PENDING),
+                    Stock(ticker="SLEN.ME", name="Сургутнефтегаз", last_price=0.0, figi_status=FigiStatus.PENDING),
+                    Stock(ticker="TASB.ME", name="Тамбовэнергосбыт", last_price=0.0, figi_status=FigiStatus.PENDING),
+                    Stock(ticker="TGKB.ME", name="ТГК-2", last_price=0.0, figi_status=FigiStatus.PENDING),
+                ]
+                session.add_all(test_stocks)
                 await session.commit()
-                logger.info("Обновление FIGI завершено")
-        except Exception as e:
-            logger.error(f"Ошибка при обновлении FIGI: {e}")
-            await session.rollback()
+                logger.info("Тестовые акции добавлены в базу.")
 
-async def start_streaming_for_users():
-    logger.info("Запуск стриминга для всех пользователей")
-    async with async_session() as session:
-        try:
-            result = await session.execute(
-                select(User).where(
-                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
-                )
-            )
-            users = result.scalars().all()
-            if not users:
-                logger.info("Нет пользователей с включённой автоторговлей")
+    except DBAPIError as e:
+        logger.error(f"Ошибка подключения к базе данных: {e}")
+        await notify_admin(f"❌ Ошибка базы данных при запуске: {str(e)}")
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при проверке базы данных: {e}")
+        await notify_admin(f"❌ Неожиданная ошибка при запуске: {str(e)}")
+
+async def update_stocks():
+    """Обновление списка акций через Tinkoff API."""
+    logger.info("Запуск обновления списка акций...")
+    try:
+        async with async_session() as session:
+            # Получаем токен администратора для API запросов
+            admin_token = os.getenv("TINKOFF_TOKEN")
+            if not admin_token:
+                logger.warning("Токен Tinkoff API не установлен, обновление акций пропущено.")
                 return
-            for user in users:
-                logger.info(f"Запуск стриминга для пользователя {user.user_id}")
-                task = asyncio.create_task(trading_bot.stream_and_trade(user.user_id))
-                trading_bot.stream_tasks[user.user_id] = task
-        except Exception as e:
-            logger.error(f"Ошибка при запуске стриминга: {e}")
 
-async def send_daily_reports():
-    logger.info("Отправка дневных отчётов")
-    async with async_session() as session:
-        try:
-            result = await session.execute(
-                select(User).where(
-                    (User.tinkoff_token != None) & (User.autotrading_enabled == True)
-                )
-            )
-            users = result.scalars().all()
-            for user in users:
-                await trading_bot.send_daily_profit_report(session, user.user_id)
-        except Exception as e:
-            logger.error(f"Ошибка при отправке дневных отчётов: {e}")
+            async with AsyncClient(admin_token) as client:
+                result = await session.execute(select(Stock))
+                stocks = result.scalars().all()
+
+                for stock in stocks:
+                    if stock.figi_status == FigiStatus.FAILED:
+                        continue
+                    try:
+                        cleaned_ticker = stock.ticker.replace(".ME", "")
+                        response = await client.instruments.share_by(
+                            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                            class_code="TQBR",
+                            id=cleaned_ticker
+                        )
+                        if response.instrument and response.instrument.figi:
+                            stock.figi = response.instrument.figi
+                            stock.name = response.instrument.name
+                            stock.figi_status = FigiStatus.SUCCESS
+                            logger.info(f"Обновлён FIGI для {stock.ticker}: {stock.figi}")
+                        else:
+                            stock.figi_status = FigiStatus.FAILED
+                            logger.warning(f"FIGI не найден для {stock.ticker}")
+                        session.add(stock)
+                        await session.commit()
+                        await asyncio.sleep(0.5)  # Ограничение скорости запросов
+                    except RequestError as e:
+                        if "RESOURCE_EXHAUSTED" in str(e):
+                            reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                            logger.warning(f"Лимит запросов API, ожидание {reset_time} секунд...")
+                            await asyncio.sleep(reset_time)
+                        else:
+                            logger.error(f"Ошибка API для {stock.ticker}: {e}")
+                            stock.figi_status = FigiStatus.FAILED
+                            session.add(stock)
+                            await session.commit()
+                    except Exception as e:
+                        logger.error(f"Неожиданная ошибка при обновлении {stock.ticker}: {e}")
+                        stock.figi_status = FigiStatus.FAILED
+                        session.add(stock)
+                        await session.commit()
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении акций: {e}")
+        await notify_admin(f"❌ Ошибка при обновлении акций: {str(e)}")
 
 @app.on_event("startup")
 async def on_startup():
-    logger.info("Запуск бота...")
+    """Инициализация при запуске приложения."""
+    logger.info("Запуск приложения...")
     try:
+        # Инициализация базы данных
         await init_db()
-        logger.info("База данных успешно инициализирована.")
+        logger.info("База данных инициализирована.")
+
+        # Проверка состояния базы данных
+        await check_database_health()
+
+        # Запуск бота
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        logger.info("Бот запущен.")
+
+        # Запуск планировщика задач
+        scheduler.add_job(update_stocks, 'interval', hours=24)
+        scheduler.add_job(trading_bot.send_daily_profit_report, 'interval', hours=24, args=[async_session, int(ADMIN_ID)] if ADMIN_ID else [])
+        scheduler.start()
+        logger.info("Планировщик задач запущен.")
+
+        # Уведомление администратора о запуске
+        await notify_admin("✅ Бот успешно запущен!")
     except Exception as e:
-        logger.error(f"Не удалось инициализировать базу данных: {e}")
+        logger.error(f"Ошибка при запуске приложения: {e}")
+        await notify_admin(f"❌ Ошибка при запуске бота: {str(e)}")
         raise
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук удалён, очередь обновлений очищена")
-    logger.info("Запуск polling на Heroku")
-    asyncio.create_task(dp.start_polling(bot))
-    
-    await start_streaming_for_users()
-    
-    scheduler.add_job(update_figi_for_all_stocks, "interval", hours=1)
-    scheduler.add_job(send_daily_reports, "cron", hour=22, minute=0)
-    scheduler.start()
-    logger.info("Планировщик запущен")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    logger.info("Остановка бота...")
-    trading_bot.stop_streaming()
-    if trading_bot.stream_tasks:
-        await asyncio.gather(*[task for task in trading_bot.stream_tasks.values()], return_exceptions=True)
-        logger.info("Все задачи стриминга завершены")
-    scheduler.shutdown()
-    await dp.stop_polling()
-    await bot.session.close()
-    await dispose_engine()
-    logger.info("Бот полностью остановлен")
+    """Очистка при завершении работы приложения."""
+    logger.info("Завершение работы приложения...")
+    try:
+        # Остановка планировщика
+        scheduler.shutdown()
+        logger.info("Планировщик задач остановлен.")
 
-@app.post("/signals")
-async def receive_signal(signal: dict):
-    ticker = signal.get("ticker")
-    signal_type = signal.get("signal_type")
-    value = signal.get("value")
-    logger.info(f"Получен сигнал: {ticker} - {signal_type} - {value}")
-    return {"status": "received"}
+        # Остановка бота
+        await dp.stop_polling()
+        logger.info("Бот остановлен.")
+
+        # Остановка торгового бота
+        trading_bot.stop_streaming()
+        logger.info("Торговый бот остановлен.")
+
+        # Закрытие соединения с базой данных
+        await dispose_engine()
+        logger.info("Соединение с базой данных закрыто.")
+
+        # Уведомление администратора о завершении
+        await notify_admin("⏹️ Бот успешно остановлен.")
+    except Exception as e:
+        logger.error(f"Ошибка при завершении работы: {e}")
+        await notify_admin(f"❌ Ошибка при остановке бота: {str(e)}")
