@@ -1,8 +1,8 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.sql import text
-import asyncpg
 import os
 import logging
+import asyncio
 from sqlalchemy.exc import OperationalError, DatabaseError
 
 logging.basicConfig(level=logging.INFO)
@@ -19,16 +19,12 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 logger.info(f"Используемый DATABASE_URL: {DATABASE_URL[:50]}... (обрезан для логов)")
 
-# Функция для создания соединения с отключённым кэшем подготовленных запросов
-async def create_connection(dsn, *args, **kwargs):
-    return await asyncpg.connect(dsn, statement_cache_size=0, **kwargs)
-
 # Создаём асинхронный движок с отключённым кэшем подготовленных запросов
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    pool_size=3,           # Уменьшаем размер пула для Heroku
-    max_overflow=5,        # Уменьшаем количество дополнительных соединений
+    pool_size=2,           # Уменьшаем размер пула для Heroku
+    max_overflow=3,        # Уменьшаем количество дополнительных соединений
     pool_timeout=30,       # Таймаут ожидания соединения
     pool_pre_ping=True,    # Проверяем соединения перед использованием
     connect_args={
@@ -36,9 +32,7 @@ engine = create_async_engine(
         "server_settings": {
             "application_name": "trading-bot",  # Имя приложения для отслеживания в PgBouncer
         }
-    },
-    poolclass=None,  # Используем встроенный пул SQLAlchemy
-    creator=create_connection  # Кастомная функция для создания соединений
+    }
 )
 
 async_session = async_sessionmaker(
@@ -49,29 +43,40 @@ async_session = async_sessionmaker(
 
 async def init_db():
     logger.info("Инициализация базы данных...")
-    try:
-        async with engine.begin() as conn:
-            # Проверяем подключение и логируем версию PostgreSQL
-            try:
-                version = await conn.scalar(text("SELECT pg_catalog.version()"))
-                logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
-            except Exception as e:
-                logger.error(f"Ошибка при проверке версии PostgreSQL: {str(e)}")
-                raise
+    for attempt in range(1, 6):  # 5 попыток
+        try:
+            async with engine.begin() as conn:
+                # Проверяем подключение и логируем версию PostgreSQL
+                try:
+                    version = await conn.scalar(text("SELECT pg_catalog.version()"))
+                    logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
+                except Exception as e:
+                    logger.error(f"Ошибка при проверке версии PostgreSQL: {str(e)}")
+                    raise
 
-            # Создание таблиц
-            from app.models import Base
-            await conn.run_sync(Base.metadata.create_all)
-            logger.info("Все таблицы успешно созданы или уже существуют.")
-    except OperationalError as e:
-        logger.error(f"Ошибка подключения к базе данных: {str(e)}")
-        raise
-    except DatabaseError as e:
-        logger.error(f"Ошибка базы данных при инициализации: {str(e)}")
-        raise
-    except Exception as e:
-        logger.error(f"Неизвестная ошибка при инициализации базы данных: {str(e)}")
-        raise
+                # Создание таблиц
+                from app.models import Base
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Все таблицы успешно созданы или уже существуют.")
+                return
+        except OperationalError as e:
+            logger.error(f"Ошибка подключения к базе данных на попытке {attempt}: {str(e)}")
+            if attempt == 5:
+                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                raise
+            await asyncio.sleep(5)  # Задержка 5 секунд перед следующей попыткой
+        except DatabaseError as e:
+            logger.error(f"Ошибка базы данных при инициализации на попытке {attempt}: {str(e)}")
+            if attempt == 5:
+                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                raise
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"Неизвестная ошибка при инициализации базы данных на попытке {attempt}: {str(e)}")
+            if attempt == 5:
+                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                raise
+            await asyncio.sleep(5)
     logger.info("База данных успешно инициализирована.")
 
 async def dispose_engine():
