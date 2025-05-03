@@ -138,16 +138,17 @@ class TradingBot:
             else:
                 gains.append(0)
                 losses.append(abs(change))
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
+        avg_gain = sum(gains[-period:]) / period if gains else 0
+        avg_loss = sum(losses[-period:]) / period if losses else 0
         if avg_loss == 0:
+            logger.debug("RSI: avg_loss = 0, возвращаем 100")
             return 100
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
         return rsi
 
     def calculate_macd(self, prices: List[float], fast_period: int = 12, slow_period: int = 26, signal_period: int = 9) -> tuple:
-        required_length = max(fast_period, slow_period, signal_period)
+        required_length = max(fast_period, slow_period, signal_period) + 1
         if not prices or len(prices) < required_length:
             logger.debug(f"Недостаточно данных для расчёта MACD: {len(prices) if prices else 0} элементов, требуется {required_length}")
             return None, None, None
@@ -225,7 +226,7 @@ class TradingBot:
         return sma, upper_band, lower_band
 
     async def train_ml_model(self, ticker: str, client: AsyncClient, figi: str):
-        required_candles = 60
+        required_candles = 50  # Уменьшено с 60 для большей гибкости
         prices = []
 
         if ticker in self.historical_data and len(self.historical_data[ticker]) >= required_candles:
@@ -247,8 +248,12 @@ class TradingBot:
                     return
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles]
                 # Проверка валидности цен
-                if not all(p > 0 for p in prices):
-                    logger.warning(f"Некорректные цены для {ticker}: {prices[:10]}...")
+                if not prices or not all(p > 0 for p in prices):
+                    logger.warning(f"Некорректные или отсутствующие цены для {ticker}: {prices[:10] if prices else []}...")
+                    return
+                # Проверка на дубликаты цен
+                if len(set(prices)) < len(prices) * 0.5:
+                    logger.warning(f"Слишком много одинаковых цен для {ticker}, пропускаем...")
                     return
                 self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles)]
                 logger.info(f"Загружено {len(prices)} свечей для {ticker} из Tinkoff API")
@@ -262,6 +267,7 @@ class TradingBot:
 
         X = []
         y = []
+        min_features = 5  # Уменьшено с 10 для большей гибкости
         for i in range(30, len(prices) - 1):
             window = prices[i-30:i]
             rsi = self.calculate_rsi(window)
@@ -276,14 +282,18 @@ class TradingBot:
             X.append(features)
             y.append(prices[i+1])
 
-        if not X or len(X) < 10:
-            logger.warning(f"Недостаточно данных для обучения ML после расчёта индикаторов для {ticker}: {len(X) if X else 0} точек")
+        if not X or len(X) < min_features:
+            logger.warning(f"Недостаточно данных для обучения ML после расчёта индикаторов для {ticker}: {len(X) if X else 0} точек, требуется минимум {min_features}")
             return
 
-        model = LinearRegression()
-        model.fit(X, y)
-        self.ml_models[ticker] = model
-        logger.info(f"ML модель обучена для {ticker}")
+        try:
+            model = LinearRegression()
+            model.fit(X, y)
+            self.ml_models[ticker] = model
+            logger.info(f"ML модель успешно обучена для {ticker} с {len(X)} точками")
+        except Exception as e:
+            logger.error(f"Ошибка при обучении ML модели для {ticker}: {e}")
+            return
 
     def predict_price(self, ticker: str, prices: List[float]) -> Optional[float]:
         if not prices or ticker not in self.ml_models or len(prices) < 30:
@@ -296,8 +306,12 @@ class TradingBot:
             logger.debug(f"Не удалось рассчитать индикаторы для предсказания цены для {ticker}")
             return None
         features = np.array([[window[-1], rsi, macd - signal]])
-        predicted_price = self.ml_models[ticker].predict(features)[0]
-        return predicted_price
+        try:
+            predicted_price = self.ml_models[ticker].predict(features)[0]
+            return predicted_price
+        except Exception as e:
+            logger.error(f"Ошибка при предсказании цены для {ticker}: {e}")
+            return None
 
     async def backtest_strategy(self, ticker: str, figi: str, client: AsyncClient) -> Dict:
         end_date = datetime.utcnow()
@@ -469,7 +483,7 @@ class TradingBot:
                             continue
 
                         backtest_result = await self.backtest_strategy(stock.ticker, figi, client)
-                        if backtest_result["profit"] < 0:
+                        if backtest_result["profit"] <= 0:
                             logger.warning(f"Стратегия убыточна для {stock.ticker} (прибыль: {backtest_result['profit']}), пропускаем...")
                             continue
 
