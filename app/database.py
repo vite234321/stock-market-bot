@@ -1,4 +1,5 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.sql import text
 import os
 import logging
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -45,7 +46,7 @@ async def init_db():
         async with engine.begin() as conn:
             # Проверяем подключение и логируем версию PostgreSQL
             try:
-                version = await conn.scalar("SELECT pg_catalog.version()")
+                version = await conn.scalar(text("SELECT pg_catalog.version()"))
                 logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
             except Exception as e:
                 logger.error(f"Ошибка при проверке версии PostgreSQL: {str(e)}")
