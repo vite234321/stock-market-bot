@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.sql import text
+import asyncpg
 import os
 import logging
 from sqlalchemy.exc import OperationalError, DatabaseError
@@ -18,12 +19,16 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 logger.info(f"Используемый DATABASE_URL: {DATABASE_URL[:50]}... (обрезан для логов)")
 
+# Функция для создания соединения с отключённым кэшем подготовленных запросов
+async def create_connection(dsn, *args, **kwargs):
+    return await asyncpg.connect(dsn, statement_cache_size=0, **kwargs)
+
 # Создаём асинхронный движок с отключённым кэшем подготовленных запросов
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    pool_size=5,           # Уменьшаем размер пула для Heroku
-    max_overflow=10,       # Ограничиваем количество дополнительных соединений
+    pool_size=3,           # Уменьшаем размер пула для Heroku
+    max_overflow=5,        # Уменьшаем количество дополнительных соединений
     pool_timeout=30,       # Таймаут ожидания соединения
     pool_pre_ping=True,    # Проверяем соединения перед использованием
     connect_args={
@@ -31,7 +36,9 @@ engine = create_async_engine(
         "server_settings": {
             "application_name": "trading-bot",  # Имя приложения для отслеживания в PgBouncer
         }
-    }
+    },
+    poolclass=None,  # Используем встроенный пул SQLAlchemy
+    creator=create_connection  # Кастомная функция для создания соединений
 )
 
 async_session = async_sessionmaker(
