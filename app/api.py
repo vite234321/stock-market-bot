@@ -42,10 +42,10 @@ dp.include_router(router)
 trading_bot = TradingBot(bot)
 dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
 
-dp.startup_timeout = 60
-dp.shutdown_timeout = 60
-dp.retry_times = 5
-dp.retry_interval = 5
+dp.startup_timeout = 120
+dp.shutdown_timeout = 120
+dp.retry_times = 10
+dp.retry_interval = 10
 
 scheduler = AsyncIOScheduler()
 
@@ -94,9 +94,20 @@ async def update_figi_for_all_stocks():
                     batch = stocks[i:i + batch_size]
                     for stock in batch:
                         original_ticker = stock.ticker
-                        stock.ticker = stock.ticker.replace('.ME', '')
-                        logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
-                        session.add(stock)
+                        cleaned_ticker = original_ticker.replace('.ME', '')
+                        if original_ticker != cleaned_ticker:
+                            # Проверяем, существует ли cleaned_ticker
+                            existing_ticker = await session.execute(
+                                select(Stock).where(Stock.ticker == cleaned_ticker)
+                            )
+                            if existing_ticker.scalars().first():
+                                logger.warning(f"Тикер {cleaned_ticker} уже существует, пропускаем обновление для {original_ticker}")
+                                stock.set_figi_status(FigiStatus.FAILED)
+                                session.add(stock)
+                                continue
+                            stock.ticker = cleaned_ticker
+                            logger.info(f"Исправлен тикер: {original_ticker} -> {stock.ticker}")
+                            session.add(stock)
                         try:
                             response = await client.instruments.share_by(
                                 id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
@@ -142,6 +153,7 @@ async def update_figi_for_all_stocks():
                 logger.info("Обновление FIGI завершено")
         except Exception as e:
             logger.error(f"Ошибка при обновлении FIGI: {e}")
+            await session.rollback()
 
 async def start_streaming_for_users():
     logger.info("Запуск стриминга для всех пользователей")

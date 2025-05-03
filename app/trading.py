@@ -31,7 +31,7 @@ class TradingBot:
         self.running = False
         self.stream_tasks: Dict[int, asyncio.Task] = {}
         self.streaming_client = None
-        self._log_counter: Dict[str, int] = {}  # Для ограничения повторяющихся логов
+        self._log_counter: Dict[str, int] = {}
 
     async def debug_available_shares(self, client: AsyncClient):
         try:
@@ -246,6 +246,10 @@ class TradingBot:
                     logger.warning(f"Не удалось получить свечи для {ticker}")
                     return
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles]
+                # Проверка валидности цен
+                if not all(p > 0 for p in prices):
+                    logger.warning(f"Некорректные цены для {ticker}: {prices[:10]}...")
+                    return
                 self.historical_data[ticker] = [{"close": p, "time": c.time} for p, c in zip(prices, candles)]
                 logger.info(f"Загружено {len(prices)} свечей для {ticker} из Tinkoff API")
             except Exception as e:
@@ -262,8 +266,11 @@ class TradingBot:
             window = prices[i-30:i]
             rsi = self.calculate_rsi(window)
             macd, signal, _ = self.calculate_macd(window)
-            if rsi is None or macd is None or signal is None:
-                logger.debug(f"Не удалось рассчитать индикаторы для {ticker} на итерации {i}")
+            if rsi is None:
+                logger.debug(f"RSI не рассчитан для {ticker} на итерации {i}: window={window[:5]}...")
+                continue
+            if macd is None or signal is None:
+                logger.debug(f"MACD не рассчитан для {ticker} на итерации {i}: window={window[:5]}...")
                 continue
             features = [window[-1], rsi, macd - signal]
             X.append(features)
@@ -433,9 +440,8 @@ class TradingBot:
                                 logger.warning(f"FIGI для {stock.ticker} не удалось обновить, пропускаем...")
                                 continue
 
-                        # Проверяем наличие достаточного количества данных
                         end_date = datetime.utcnow()
-                        start_date = end_date - timedelta(days=90)  # Уменьшаем период для ускорения
+                        start_date = end_date - timedelta(days=90)
                         try:
                             candles_response = await client.market_data.get_candles(
                                 figi=figi,
@@ -468,6 +474,9 @@ class TradingBot:
                             continue
 
                         await self.train_ml_model(stock.ticker, client, figi)
+                        if stock.ticker not in self.ml_models:
+                            logger.warning(f"ML модель не обучена для {stock.ticker}, пропускаем...")
+                            continue
                         figis_to_subscribe.append(figi)
 
                 if not figis_to_subscribe:
@@ -523,10 +532,9 @@ class TradingBot:
                             self.historical_data[ticker] = self.historical_data[ticker][-100:]
                             logger.debug(f"Ограничен размер исторических данных для {ticker} до 100 свечей")
 
-                        # Ограничиваем частоту логов
                         log_key = f"candle_{ticker}"
                         self._log_counter[log_key] = self._log_counter.get(log_key, 0) + 1
-                        if self._log_counter[log_key] % 10 == 0:  # Логируем каждую 10-ю свечу
+                        if self._log_counter[log_key] % 10 == 0:
                             logger.debug(f"Обработана свеча для {ticker}: price={current_price}, time={candle.time}")
 
                         news = await self.fetch_news(ticker)
