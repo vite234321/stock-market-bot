@@ -9,7 +9,7 @@ from app.database import init_db, async_session, engine, dispose_engine
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
-from sqlalchemy.sql import text
+from sqlalchemy.sql import text, func
 from sqlalchemy.exc import DBAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 try:
@@ -20,6 +20,7 @@ from tinkoff.invest.exceptions import RequestError
 import logging
 import os
 import asyncio
+import uvicorn
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -154,6 +155,20 @@ async def update_stocks():
         logger.error(f"Ошибка при обновлении акций: {e}")
         await notify_admin(f"❌ Ошибка при обновлении акций: {str(e)}")
 
+@app.get("/health")
+async def health_check():
+    """Эндпоинт для проверки работоспособности приложения."""
+    return {"status": "ok"}
+
+async def start_bot_polling():
+    """Запуск поллинга бота в фоновом режиме."""
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        logger.info("Бот запущен в режиме поллинга.")
+    except Exception as e:
+        logger.error(f"Ошибка при запуске поллинга бота: {e}")
+        await notify_admin(f"❌ Ошибка при запуске поллинга бота: {str(e)}")
+
 @app.on_event("startup")
 async def on_startup():
     """Инициализация при запуске приложения."""
@@ -166,15 +181,14 @@ async def on_startup():
         # Проверка состояния базы данных
         await check_database_health()
 
-        # Запуск бота
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        logger.info("Бот запущен.")
-
         # Запуск планировщика задач
         scheduler.add_job(update_stocks, 'interval', hours=24)
         scheduler.add_job(trading_bot.send_daily_profit_report, 'interval', hours=24, args=[async_session, int(ADMIN_ID)] if ADMIN_ID else [])
         scheduler.start()
         logger.info("Планировщик задач запущен.")
+
+        # Запуск поллинга бота в фоновом режиме
+        asyncio.create_task(start_bot_polling())
 
         # Уведомление администратора о запуске
         await notify_admin("✅ Бот успешно запущен!")
@@ -209,3 +223,7 @@ async def on_shutdown():
     except Exception as e:
         logger.error(f"Ошибка при завершении работы: {e}")
         await notify_admin(f"❌ Ошибка при остановке бота: {str(e)}")
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
