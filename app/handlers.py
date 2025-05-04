@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 try:
     from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
 except ImportError as e:
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest-api установлен в requirements.txt.") from e
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
 from tinkoff.invest.exceptions import InvestError
 import matplotlib.pyplot as plt
 import os

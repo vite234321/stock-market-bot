@@ -14,8 +14,9 @@ from sqlalchemy.exc import DBAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 try:
     from tinkoff.invest import AsyncClient, InstrumentIdType
+    import tinkoff.invest
 except ImportError as e:
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest-api установлен в requirements.txt.") from e
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
 from tinkoff.invest.exceptions import RequestError
 import logging
 import os
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
+logger.info(f"Используемая версия tinkoff-invest: {tinkoff.invest.__version__}")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
