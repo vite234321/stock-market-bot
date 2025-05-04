@@ -6,3 +6,5 @@ tinkoff-invest>=0.2.0
 apscheduler==3.10.4
 uvicorn==0.30.6
 matplotlib==3.9.2
+scikit-learn==1.5.2
+numpy==2.1.2
