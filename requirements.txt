@@ -2,9 +2,11 @@ fastapi==0.115.0
 aiogram==3.13.1
 sqlalchemy==2.0.35
 asyncpg==0.30.0
-tinkoff-invest>=0.2.0
+tinkoff-invest==0.2.0
 apscheduler==3.10.4
 uvicorn==0.30.6
 matplotlib==3.9.2
 scikit-learn==1.5.2
 numpy==2.1.2
+grpcio==1.66.2
+protobuf==5.28.2

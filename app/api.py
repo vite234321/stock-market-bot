@@ -12,24 +12,29 @@ from sqlalchemy import select
 from sqlalchemy.sql import text, func
 from sqlalchemy.exc import DBAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-try:
-    from tinkoff.invest import AsyncClient, InstrumentIdType
-    import tinkoff.invest
-except ImportError as e:
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
-from tinkoff.invest.exceptions import RequestError
 import logging
 import os
 import asyncio
 import uvicorn
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Проверка установки tinkoff-invest
+try:
+    import tinkoff
+    import tinkoff.invest
+    from tinkoff.invest import AsyncClient, InstrumentIdType
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info(f"Модуль tinkoff-invest успешно импортирован, версия: {tinkoff.invest.__version__}")
+except ImportError as e:
+    logging.basicConfig(level=logging.ERROR)
+    logger = logging.getLogger(__name__)
+    logger.error("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.")
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
+from tinkoff.invest.exceptions import RequestError
 
 app = FastAPI()
 
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
-logger.info(f"Используемая версия tinkoff-invest: {tinkoff.invest.__version__}")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:

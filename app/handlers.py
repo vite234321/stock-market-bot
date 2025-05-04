@@ -6,18 +6,24 @@ import logging
 from app.models import Stock, Subscription, Signal, User, TradeHistory
 from sqlalchemy import select, func
 from datetime import datetime, timedelta
-try:
-    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
-except ImportError as e:
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
-from tinkoff.invest.exceptions import InvestError
 import matplotlib.pyplot as plt
 import os
 import asyncio
 import html
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Проверка установки tinkoff-invest
+try:
+    import tinkoff
+    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
+except ImportError as e:
+    logging.basicConfig(level=logging.ERROR)
+    logger = logging.getLogger(__name__)
+    logger.error("Ошибка импорта tinkoff.invest в handlers.py. Убедитесь, что tinkoff-invest установлен в requirements.txt.")
+    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
+from tinkoff.invest.exceptions import InvestError
 
 router = Router()
 
