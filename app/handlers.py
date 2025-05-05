@@ -13,21 +13,8 @@ import html
 from typing import Optional
 import aiohttp
 
-# Проверка установки tinkoff-invest
-try:
-    import tinkoff
-    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    # Убедимся, что логи не отправляются в Telegram
-    logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
-    logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
-except ImportError as e:
-    logging.basicConfig(level=logging.ERROR)
-    logger = logging.getLogger(__name__)
-    logger.error("Ошибка импорта tinkoff.invest в handlers.py. Убедитесь, что tinkoff-invest установлен в requirements.txt.")
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
-from tinkoff.invest.exceptions import InvestError
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -80,93 +67,33 @@ def get_autotrading_menu():
 async def calculate_indicators(prices: list) -> tuple:
     if len(prices) < 20:
         return None, None, None, None, None
-
-    # RSI (14 дней)
     gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices[-14:]))]
     losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices[-14:]))]
     avg_gain = sum(gains) / 14 if gains else 0
     avg_loss = sum(losses) / 14 if losses else 0
     rs = avg_gain / avg_loss if avg_loss else float('inf')
     rsi = 100 - (100 / (1 + rs)) if rs != float('inf') else 100
-
-    # MACD (EMA 12, 26, Signal 9)
-    ema_12 = sum(prices[-12:]) / 12
-    ema_26 = sum(prices[-26:]) / 26 if len(prices) >= 26 else ema_12
-    macd = ema_12 - ema_26
-    signal = sum(prices[-9:]) / 9 if len(prices) >= 9 else macd
-    histogram = macd - signal
-
-    # Bollinger Bands (20 дней)
     sma = sum(prices[-20:]) / 20
     std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
     upper_band = sma + 2 * std
     lower_band = sma - 2 * std
+    return rsi, sma, upper_band, lower_band, None
 
-    return rsi, macd, signal, upper_band, lower_band
-
-async def fetch_figi_with_retry(client: AsyncClient, ticker: str, max_retries: int = 3) -> Optional[str]:
-    for attempt in range(max_retries):
-        try:
-            cleaned_ticker = ticker.replace(".ME", "")
-            instrument = await client.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code="TQBR",
-                id=cleaned_ticker
-            )
-            return instrument.instrument.figi
-        except InvestError as e:
-            if "RESOURCE_EXHAUSTED" in str(e):
-                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
-                logger.warning(f"Попытка {attempt + 1}/{max_retries}: Лимит запросов превышен, ожидание {reset_time} секунд...")
-                await asyncio.sleep(reset_time)
-            else:
-                logger.error(f"Попытка {attempt + 1}/{max_retries}: Не удалось получить FIGI для {ticker}: {e}")
-                break
-        except Exception as e:
-            logger.error(f"Попытка {attempt + 1}/{max_retries}: Неожиданная ошибка для {ticker}: {e}")
-            break
-    return None
-
-async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession) -> Optional[str]:
+async def fetch_moex_data(ticker: str) -> list:
     try:
-        response = await client.instruments.share_by(
-            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-            class_code="TQBR",
-            id=stock.ticker
-        )
-        stock.figi = response.instrument.figi
-        session.add(stock)
-        await session.commit()
-        logger.info(f"FIGI для {stock.ticker} обновлён: {stock.figi}")
-        return stock.figi
-    except InvestError as e:
-        if "RESOURCE_EXHAUSTED" in str(e):
-            reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
-            logger.warning(f"Достигнут лимит запросов API, ожидание {reset_time} секунд...")
-            await asyncio.sleep(reset_time)
-            response = await client.instruments.share_by(
-                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                class_code="TQBR",
-                id=stock.ticker
-            )
-            stock.figi = response.instrument.figi
-            session.add(stock)
-            await session.commit()
-            logger.info(f"FIGI для {stock.ticker} обновлён после ожидания: {stock.figi}")
-            return stock.figi
-        else:
-            logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-            return None
+        client = moexalgo.MoexClient()
+        candles = client.get_candles(ticker, period="1d", limit=30)
+        return [c['CLOSE'] for c in candles]
     except Exception as e:
-        logger.error(f"Не удалось обновить FIGI для {stock.ticker}: {e}")
-        return None
+        logger.error(f"Ошибка при получении данных MOEX для {ticker}: {e}")
+        return []
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     logger.info(f"Получена команда /start от пользователя {message.from_user.id}")
     welcome_text = (
         "🌟 <b>StockBot — Ваш помощник на MOEX!</b> 🌟\n\n"
-        "Я помогу следить за акциями и торговать! 🚀\n"
+        "Я помогу следить за акциями и торговать на Мосбирже! 🚀\n"
         "Выберите раздел в меню ниже 👇"
     )
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu())
@@ -250,11 +177,8 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
 
         response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
-            # Проверяем figi_status, если None, то отображаем как "UNKNOWN"
-            status = stock.figi_status if stock.figi_status else "UNKNOWN"
-            status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
             price = stock.last_price if stock.last_price is not None else "N/A"
-            response += f"{status_icon} {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
+            response += f"🔹 {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
         response += "\n⬅️ Вернуться в меню акций."
         await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
@@ -265,88 +189,48 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
 @router.callback_query(lambda c: c.data == "check_price")
 async def prompt_check_price(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет проверить цену акции")
-    await callback_query.message.answer("🔍 Введите тикер акции (например, SBER.ME):")
+    await callback_query.message.answer("🔍 Введите тикер акции (например, SBER):")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "price_chart")
 async def prompt_price_chart(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет увидеть график цены акции")
-    await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER.ME):")
+    await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER):")
     await callback_query.answer()
 
-@router.message(lambda message: message.text.endswith(".ME"))
+@router.message(lambda message: message.text)
 async def generate_price_chart(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     ticker = message.text.strip()
     logger.info(f"Пользователь {user_id} запросил график цены для {ticker}")
 
     try:
-        user_result = await session.execute(
-            select(User).where(User.user_id == user_id)
-        )
-        user = user_result.scalars().first()
-        if not user or not user.tinkoff_token:
-            await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+        prices = await fetch_moex_data(ticker)
+        if not prices or len(prices) < 5:
+            await message.answer(f"Недостаточно данных для построения графика {ticker}.")
             return
 
-        stock_result = await session.execute(
-            select(Stock).where(Stock.ticker == ticker)
-        )
-        stock = stock_result.scalars().first()
-        if not stock:
-            await message.answer(f"Акция {ticker} не найдена в базе.")
-            return
+        dates = [datetime.utcnow() - timedelta(days=i) for i in range(len(prices)-1, -1, -1)]
+        plt.figure(figsize=(10, 5))
+        plt.plot(dates, prices, marker='o', linestyle='-', color='b')
+        plt.title(f"График цены {ticker} (30 дней)")
+        plt.xlabel("Дата")
+        plt.ylabel("Цена (RUB)")
+        plt.grid(True)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
 
-        async with AsyncClient(user.tinkoff_token) as client:
-            figi = stock.figi
-            if not figi:
-                logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
-                figi = await update_figi(client, stock, session)
-                if not figi:
-                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.")
-                    return
+        chart_path = f"chart_{user_id}_{ticker}.png"
+        plt.savefig(chart_path)
+        plt.close()
 
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=30)
-            try:
-                candles = await client.market_data.get_candles(
-                    figi=figi,
-                    from_=start_date,
-                    to=end_date,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
-            except InvestError as e:
-                logger.error(f"Ошибка Tinkoff API при получении свечей для {ticker}: {e}")
-                await message.answer(f"Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже.")
-                return
-
-            if not candles.candles or len(candles.candles) < 5:
-                await message.answer(f"Недостаточно данных для построения графика {ticker}.")
-                return
-
-            dates = [candle.time for candle in candles.candles]
-            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-
-            plt.figure(figsize=(10, 5))
-            plt.plot(dates, prices, marker='o', linestyle='-', color='b')
-            plt.title(f"График цены {ticker} (30 дней)")
-            plt.xlabel("Дата")
-            plt.ylabel("Цена (RUB)")
-            plt.grid(True)
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-
-            chart_path = f"chart_{user_id}_{ticker.replace('.ME', '')}.png"
-            plt.savefig(chart_path)
-            plt.close()
-
-            try:
-                chart_file = FSInputFile(chart_path)
-                await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
-            finally:
-                if os.path.exists(chart_path):
-                    os.remove(chart_path)
-                    logger.info(f"Файл графика {chart_path} удалён")
+        try:
+            chart_file = FSInputFile(chart_path)
+            await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
+        finally:
+            if os.path.exists(chart_path):
+                os.remove(chart_path)
+                logger.info(f"Файл графика {chart_path} удалён")
     except Exception as e:
         logger.error(f"Ошибка при построении графика для {ticker}: {e}")
         await message.answer("❌ Ошибка при построении графика.")
@@ -354,7 +238,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет подписаться на акции")
-    await callback_query.message.answer("🔔 Введите тикер акции для подписки (например, SBER.ME):")
+    await callback_query.message.answer("🔔 Введите тикер акции для подписки (например, SBER):")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "signals")
@@ -384,90 +268,61 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
             select(User).where(User.user_id == user_id)
         )
         user = user_result.scalars().first()
-        if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+        if not user or not user.moex_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен MOEX. Установите его в меню настроек.")
             return
 
-        async with AsyncClient(user.tinkoff_token) as client:
-            response = "📊 <b>Сигналы роста:</b>\n\n"
-            for stock in stocks:
-                if not stock.figi:
-                    figi = await update_figi(client, stock, session)
-                    if not figi:
-                        logger.warning(f"Пропущена акция {stock.ticker} из-за отсутствия FIGI")
-                        continue
+        response = "📊 <b>Сигналы роста:</b>\n\n"
+        for stock in stocks:
+            ticker = stock.ticker
+            prices = await fetch_moex_data(ticker)
+            if len(prices) < 20:
+                logger.warning(f"Недостаточно данных для {ticker}")
+                continue
+            rsi, sma, upper_band, lower_band, _ = await calculate_indicators(prices)
+            current_price = prices[-1]
 
-                end_date = datetime.utcnow()
-                start_date = end_date - timedelta(days=30)
-                try:
-                    candles = await client.market_data.get_candles(
-                        figi=stock.figi,
-                        from_=start_date,
-                        to=end_date,
-                        interval=CandleInterval.CANDLE_INTERVAL_DAY
-                    )
-                except InvestError as e:
-                    logger.warning(f"Ошибка получения свечей для {stock.ticker}: {e}")
-                    continue
-
-                if not candles.candles or len(candles.candles) < 20:
-                    logger.warning(f"Недостаточно данных для {stock.ticker}: {len(candles.candles)} свечей")
-                    continue
-
-                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                rsi, macd, signal, upper_band, lower_band = await calculate_indicators(prices)
-
-                if rsi is None:
-                    logger.warning(f"Не удалось рассчитать индикаторы для {stock.ticker}")
-                    continue
-
-                current_price = prices[-1]
-                logger.info(f"Индикаторы для {stock.ticker}: RSI={rsi:.2f}, MACD={macd:.2f}, Signal={signal:.2f}, "
-                           f"Upper Band={upper_band:.2f}, Lower Band={lower_band:.2f}, Current Price={current_price:.2f}")
-
+            if rsi is not None:
                 signal_text = ""
-                if rsi < 30 and macd > signal and current_price < lower_band:
-                    signal_text = "📈 Сигнал на покупку: RSI < 30, MACD > Signal, цена ниже нижней Bollinger Band"
+                if rsi < 30 and current_price < lower_band:
+                    signal_text = "📈 Сигнал на покупку: RSI < 30, цена ниже нижней Bollinger Band"
                 elif rsi > 70 and current_price > upper_band:
                     signal_text = "📉 Сигнал на продажу: RSI > 70, цена выше верхней Bollinger Band"
-                else:
-                    logger.info(f"Сигналы для {stock.ticker} не сгенерированы: RSI={rsi:.2f}, "
-                               f"MACD-Signal={macd-signal:.2f}, Price vs Bands={current_price:.2f} ({lower_band:.2f}, {upper_band:.2f})")
 
                 if signal_text:
-                    response += f"🔹 {stock.ticker} ({stock.name})\n"
+                    response += f"🔹 {ticker} ({stock.name})\n"
                     response += f"💰 Цена: {current_price:.2f} RUB\n"
                     response += f"📊 {signal_text}\n"
                     response += f"📈 RSI: {rsi:.2f}\n\n"
 
-            if not response.strip().endswith("📊 <b>Сигналы роста:</b>\n\n"):
-                response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
+        if not response.strip().endswith("📊 <b>Сигналы роста:</b>\n\n"):
+            response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
 
-            response += "⬅️ Вернуться в меню акций."
-            await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+        response += "⬅️ Вернуться в меню акций."
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении сигналов: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении сигналов. Проверьте подключение к Tinkoff API.")
+        await callback_query.message.answer("Произошла ошибка при получении сигналов.")
     await callback_query.answer()
 
-@router.message(lambda message: message.text.startswith('t.'))
+@router.message(lambda message: message.text.startswith('m.'))
 async def save_token(message: Message, session: AsyncSession):
     user_id = message.from_user.id
     token = message.text.strip()
-    logger.info(f"Пользователь {user_id} ввёл токен T-Invest API: {token[:10]}...")
+    logger.info(f"Пользователь {user_id} ввёл токен MOEX: {token[:10]}...")
 
     try:
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
         if user:
-            user.tinkoff_token = token
+            user.moex_token = token
         else:
-            new_user = User(user_id=user_id, tinkoff_token=token)
+            new_user = User(user_id=user_id, moex_token=token)
             session.add(new_user)
 
         await session.commit()
-        await message.answer("✅ Токен успешно сохранён! Теперь я могу торговать за вас.", reply_markup=get_settings_menu())
+        await message.answer("✅ Токен успешно сохранён! Теперь я могу торговать на MOEX.", reply_markup=get_settings_menu())
     except Exception as e:
         logger.error(f"Ошибка при сохранении токена для пользователя {user_id}: {e}")
         await message.answer("❌ Ошибка при сохранении токена. Попробуйте снова.", reply_markup=get_settings_menu())
@@ -486,8 +341,8 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
 
-        if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+        if not user or not user.moex_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен MOEX. Установите его в меню настроек.")
             return
 
         result = await session.execute(
@@ -512,23 +367,13 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
 
         profit = total_sell - total_buy
 
-        async with AsyncClient(user.tinkoff_token) as client:
-            accounts = await client.users.get_accounts()
-            if not accounts.accounts:
-                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
-                return
-            account_id = accounts.accounts[0].id
-
-            portfolio = await client.operations.get_portfolio(account_id=account_id)
-            total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
-
         profile_text = (
             f"📊 <b>Ваш профиль</b>\n\n"
             f"🆔 Ваш ID: {user_id}\n"
-            f"🔑 Токен T-Invest API: {user.tinkoff_token[:10]}...\n"
+            f"🔑 Токен MOEX: {user.moex_token[:10]}...\n"
             f"📋 Подписки: {', '.join(subscribed_tickers) if subscribed_tickers else 'Нет подписок'}\n"
             f"🤖 Статус автоторговли: {'Активна' if user.autotrading_enabled else 'Отключена'}\n"
-            f"💰 Текущий баланс: {total_balance:.2f} RUB\n"
+            f"💰 Текущий баланс: N/A (интеграция баланса в разработке)\n"
             f"🔄 Всего сделок: {total_trades}\n"
             f"📉 Покупки: {total_buy:.2f} RUB\n"
             f"📈 Продажи: {total_sell:.2f} RUB\n"
@@ -549,14 +394,14 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         user = result.scalars().first()
         if not user:
             await callback_query.message.answer(
-                "❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.",
+                "❌ Вы не зарегистрированы. Установите токен MOEX в меню настроек.",
                 reply_markup=get_autotrading_menu()
             )
             return
 
-        if not user.tinkoff_token:
+        if not user.moex_token:
             await callback_query.message.answer(
-                "❌ Токен T-Invest API не установлен. Установите его в меню настроек.",
+                "❌ Токен MOEX не установлен. Установите его в меню настроек.",
                 reply_markup=get_autotrading_menu()
             )
             return
@@ -584,74 +429,14 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
 
-        # Игнорируем результаты бэктеста и пробуем торговать
-        async with AsyncClient(user.tinkoff_token) as client:
-            account_id = (await client.users.get_accounts()).accounts[0].id
-            for stock in stocks:
-                if stock.ticker != "SBER.ME":
-                    continue
-                if not stock.figi:
-                    figi = await fetch_figi_with_retry(client, stock.ticker)
-                    if not figi:
-                        logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
-                        continue
-                    stock.figi = figi
-                    session.add(stock)
-                    await session.commit()
-
-                candles = await client.market_data.get_candles(
-                    figi=stock.figi,
-                    from_=datetime.utcnow() - timedelta(days=30),
-                    to=datetime.utcnow(),
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
-                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                rsi, _, _, _, _ = await calculate_indicators(prices)
-                if rsi and rsi < 30:
-                    logger.info(f"Покупка акции {stock.ticker} по стратегии RSI < 30")
-                    last_price = (await client.market_data.get_last_prices(figi=[stock.figi])).last_prices[0].price
-                    last_price_value = last_price.units + last_price.nano / 1e9
-                    order = await client.orders.post_order(
-                        figi=stock.figi,
-                        quantity=1,
-                        price=last_price,
-                        direction=OrderDirection.ORDER_DIRECTION_BUY,
-                        account_id=account_id,
-                        order_type="LIMIT"
-                    )
-                    trade = TradeHistory(
-                        user_id=user_id,
-                        ticker=stock.ticker,
-                        action="buy",
-                        quantity=1,
-                        price=last_price_value,
-                        total=last_price_value,
-                        created_at=datetime.utcnow()
-                    )
-                    session.add(trade)
-                    await session.commit()
-                    await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {last_price_value:.2f} RUB")
-                    break  # Покупаем только одну акцию для теста
-
         await callback_query.message.answer(
             "▶️ Автоторговля включена!",
             reply_markup=get_autotrading_menu()
         )
     except Exception as e:
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {str(e)}")
-        error_message = "❌ Ошибка при включении автоторговли: "
-        if "Нет подходящих тикеров" in str(e):
-            error_message += "Нет подходящих акций для торговли. Попробуйте добавить другие тикеры."
-        elif "Токен T-Invest API не найден" in str(e):
-            error_message += "Токен T-Invest API не установлен."
-        elif "Instrument not found" in str(e):
-            error_message += "Некоторые тикеры недоступны. Проверьте базу акций."
-        elif "Недостаточно данных для обучения ML" in str(e):
-            error_message += "Недостаточно данных для обучения модели."
-        else:
-            error_message += f"Неизвестная ошибка: {html.escape(str(e))}."
         await callback_query.message.answer(
-            error_message,
+            "❌ Ошибка при включении автоторговли.",
             reply_markup=get_autotrading_menu()
         )
     await callback_query.answer()
@@ -665,7 +450,7 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
         user = result.scalars().first()
 
         if not user:
-            await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.")
+            await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен MOEX в меню настроек.")
             return
 
         user.autotrading_enabled = False
@@ -713,22 +498,13 @@ async def balance(callback_query: CallbackQuery, session: AsyncSession):
             select(User).where(User.user_id == user_id)
         )
         user = user_result.scalars().first()
-        if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+        if not user or not user.moex_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен MOEX. Установите его в меню настроек.")
             return
 
-        async with AsyncClient(user.tinkoff_token) as client:
-            accounts = await client.users.get_accounts()
-            if not accounts.accounts:
-                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
-                return
-            account_id = accounts.accounts[0].id
-
-            portfolio = await client.operations.get_portfolio(account_id=account_id)
-            total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
-
+        # Простая заглушка, так как баланс требует интеграции с торговой системой MOEX
         await callback_query.message.answer(
-            f"💰 Ваш текущий баланс: {total_balance:.2f} RUB",
+            "💰 Ваш текущий баланс: N/A (интеграция в разработке)",
             reply_markup=get_trading_menu()
         )
     except Exception as e:
@@ -741,15 +517,14 @@ async def daily_stats(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил дневную статистику")
     try:
-        from app.trading import TradingBot
         trading_bot = TradingBot(None)
         stats = await trading_bot.calculate_daily_profit(session, user_id)
         today = datetime.utcnow().date()
         response = (
             f"📅 <b>Дневная статистика ({today.strftime('%Y-%m-%d')}):</b>\n\n"
             f"🔄 Сделок: {stats['total_trades']}\n"
-            f"📉 Покупок: {stats['total_buy']:.2f} RUB\n"
-            f"📈 Продаж: {stats['total_sell']:.2f} RUB\n"
+            f"📉 Покупки: {stats['total_buy']:.2f} RUB\n"
+            f"📈 Продажи: {stats['total_sell']:.2f} RUB\n"
             f"📊 Прибыль: {stats['profit']:.2f} RUB\n"
             f"\n⬅️ Вернуться в меню торговли."
         )
