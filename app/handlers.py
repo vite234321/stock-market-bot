@@ -10,8 +10,9 @@ import matplotlib.pyplot as plt
 import os
 import asyncio
 import html
-from typing import Optional
+from typing import Optional, List, Tuple
 import aiohttp
+from app.trading import calculate_indicators
 
 # Проверка установки tinkoff-invest
 try:
@@ -19,7 +20,6 @@ try:
     from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    # Убедимся, что логи не отправляются в Telegram
     logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
     logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
 except ImportError as e:
@@ -76,33 +76,6 @@ def get_autotrading_menu():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_trading")],
     ])
     return keyboard
-
-async def calculate_indicators(prices: list) -> tuple:
-    if len(prices) < 20:
-        return None, None, None, None, None
-
-    # RSI (14 дней)
-    gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices[-14:]))]
-    losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices[-14:]))]
-    avg_gain = sum(gains) / 14 if gains else 0
-    avg_loss = sum(losses) / 14 if losses else 0
-    rs = avg_gain / avg_loss if avg_loss else float('inf')
-    rsi = 100 - (100 / (1 + rs)) if rs != float('inf') else 100
-
-    # MACD (EMA 12, 26, Signal 9)
-    ema_12 = sum(prices[-12:]) / 12
-    ema_26 = sum(prices[-26:]) / 26 if len(prices) >= 26 else ema_12
-    macd = ema_12 - ema_26
-    signal = sum(prices[-9:]) / 9 if len(prices) >= 9 else macd
-    histogram = macd - signal
-
-    # Bollinger Bands (20 дней)
-    sma = sum(prices[-20:]) / 20
-    std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
-    upper_band = sma + 2 * std
-    lower_band = sma - 2 * std
-
-    return rsi, macd, signal, upper_band, lower_band
 
 async def fetch_figi_with_retry(client: AsyncClient, ticker: str, max_retries: int = 3) -> Optional[str]:
     for attempt in range(max_retries):
@@ -250,7 +223,6 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
 
         response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
-            # Проверяем figi_status, если None, то отображаем как "UNKNOWN"
             status = stock.figi_status if stock.figi_status else "UNKNOWN"
             status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
             price = stock.last_price if stock.last_price is not None else "N/A"
@@ -417,28 +389,24 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
                 rsi, macd, signal, upper_band, lower_band = await calculate_indicators(prices)
 
-                if rsi is None:
-                    logger.warning(f"Не удалось рассчитать индикаторы для {stock.ticker}")
-                    continue
-
                 current_price = prices[-1]
-                logger.info(f"Индикаторы для {stock.ticker}: RSI={rsi:.2f}, MACD={macd:.2f}, Signal={signal:.2f}, "
-                           f"Upper Band={upper_band:.2f}, Lower Band={lower_band:.2f}, Current Price={current_price:.2f}")
+                logger.info(f"Индикаторы для {stock.ticker}: RSI={rsi[-1]:.2f}, MACD={macd[-1]:.2f}, Signal={signal[-1]:.2f}, "
+                           f"Upper Band={upper_band[-1]:.2f}, Lower Band={lower_band[-1]:.2f}, Current Price={current_price:.2f}")
 
                 signal_text = ""
-                if rsi < 30 and macd > signal and current_price < lower_band:
-                    signal_text = "📈 Сигнал на покупку: RSI < 30, MACD > Signal, цена ниже нижней Bollinger Band"
-                elif rsi > 70 and current_price > upper_band:
-                    signal_text = "📉 Сигнал на продажу: RSI > 70, цена выше верхней Bollinger Band"
+                if rsi[-1] < 35 and macd[-1] > signal[-1]:
+                    signal_text = "📈 Сигнал на покупку: RSI < 35, MACD > Signal"
+                elif rsi[-1] > 65:
+                    signal_text = "📉 Сигнал на продажу: RSI > 65"
                 else:
-                    logger.info(f"Сигналы для {stock.ticker} не сгенерированы: RSI={rsi:.2f}, "
-                               f"MACD-Signal={macd-signal:.2f}, Price vs Bands={current_price:.2f} ({lower_band:.2f}, {upper_band:.2f})")
+                    logger.info(f"Сигналы для {stock.ticker} не сгенерированы: RSI={rsi[-1]:.2f}, "
+                               f"MACD-Signal={macd[-1]-signal[-1]:.2f}, Price={current_price:.2f}")
 
                 if signal_text:
                     response += f"🔹 {stock.ticker} ({stock.name})\n"
                     response += f"💰 Цена: {current_price:.2f} RUB\n"
                     response += f"📊 {signal_text}\n"
-                    response += f"📈 RSI: {rsi:.2f}\n\n"
+                    response += f"📈 RSI: {rsi[-1]:.2f}\n\n"
 
             if not response.strip().endswith("📊 <b>Сигналы роста:</b>\n\n"):
                 response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
@@ -568,70 +536,12 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        stocks_result = await session.execute(select(Stock))
-        stocks = stocks_result.scalars().all()
-        if not stocks:
-            await callback_query.message.answer(
-                "❌ Нет доступных акций для торговли. Обратитесь к администратору или добавьте тикеры.",
-                reply_markup=get_autotrading_menu()
-            )
-            return
-
         user.autotrading_enabled = True
         await session.commit()
 
         trading_bot.stop_streaming(user_id)
-        task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
+        task = asyncio.create_task(trading_bot.stream_and_trade(user_id, session))
         trading_bot.stream_tasks[user_id] = task
-
-        # Игнорируем результаты бэктеста и пробуем торговать
-        async with AsyncClient(user.tinkoff_token) as client:
-            account_id = (await client.users.get_accounts()).accounts[0].id
-            for stock in stocks:
-                if stock.ticker != "SBER.ME":
-                    continue
-                if not stock.figi:
-                    figi = await fetch_figi_with_retry(client, stock.ticker)
-                    if not figi:
-                        logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
-                        continue
-                    stock.figi = figi
-                    session.add(stock)
-                    await session.commit()
-
-                candles = await client.market_data.get_candles(
-                    figi=stock.figi,
-                    from_=datetime.utcnow() - timedelta(days=30),
-                    to=datetime.utcnow(),
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
-                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                rsi, _, _, _, _ = await calculate_indicators(prices)
-                if rsi and rsi < 30:
-                    logger.info(f"Покупка акции {stock.ticker} по стратегии RSI < 30")
-                    last_price = (await client.market_data.get_last_prices(figi=[stock.figi])).last_prices[0].price
-                    last_price_value = last_price.units + last_price.nano / 1e9
-                    order = await client.orders.post_order(
-                        figi=stock.figi,
-                        quantity=1,
-                        price=last_price,
-                        direction=OrderDirection.ORDER_DIRECTION_BUY,
-                        account_id=account_id,
-                        order_type="LIMIT"
-                    )
-                    trade = TradeHistory(
-                        user_id=user_id,
-                        ticker=stock.ticker,
-                        action="buy",
-                        quantity=1,
-                        price=last_price_value,
-                        total=last_price_value,
-                        created_at=datetime.utcnow()
-                    )
-                    session.add(trade)
-                    await session.commit()
-                    await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {last_price_value:.2f} RUB")
-                    break  # Покупаем только одну акцию для теста
 
         await callback_query.message.answer(
             "▶️ Автоторговля включена!",
@@ -646,8 +556,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             error_message += "Токен T-Invest API не установлен."
         elif "Instrument not found" in str(e):
             error_message += "Некоторые тикеры недоступны. Проверьте базу акций."
-        elif "Недостаточно данных для обучения ML" in str(e):
-            error_message += "Недостаточно данных для обучения модели."
         else:
             error_message += f"Неизвестная ошибка: {html.escape(str(e))}."
         await callback_query.message.answer(
