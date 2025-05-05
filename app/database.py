@@ -26,7 +26,7 @@ logger.info("Строка подключения к базе данных: %s", 
 engine = None
 async_session = None
 
-def create_async_engine():
+def create_engine_wrapper():
     """Создание асинхронного движка SQLAlchemy."""
     try:
         return create_async_engine(DATABASE_URL)
@@ -40,7 +40,7 @@ async def init_db():
     for attempt in range(1, 11):  # 10 попыток
         try:
             logger.info("Попытка %d: подключение к базе данных...", attempt)
-            engine = create_async_engine()
+            engine = create_engine_wrapper()
             async with engine.begin() as conn:
                 logger.info("Соединение с базой данных успешно установлено.")
                 await conn.run_sync(Base.metadata.create_all)
