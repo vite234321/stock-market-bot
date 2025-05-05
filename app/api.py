@@ -10,19 +10,15 @@ from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from functools import wraps
-import logging
-import os
-import asyncio
-from typing import Dict
-
 try:
     from tinkoff.invest import AsyncClient, InstrumentIdType
 except ImportError as e:
     raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest-api установлен в requirements.txt.") from e
 from tinkoff.invest.exceptions import RequestError
+import logging
+import os
+import asyncio
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -30,7 +26,6 @@ app = FastAPI()
 
 logger.info(f"Используемая версия aiogram: {aiogram.__version__}")
 
-# Получение токена бота из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен в переменных окружения")
@@ -54,24 +49,6 @@ dp.retry_interval = 10
 
 scheduler = AsyncIOScheduler()
 
-# Декоратор для повторных попыток
-def retry(max_attempts=3, delay=5):
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        logger.error(f"Не удалось выполнить {func.__name__} после {max_attempts} попыток: {str(e)}")
-                        raise
-                    logger.warning(f"Попытка {attempt + 1}/{max_attempts} не удалась для {func.__name__}: {str(e)}, повторяем...")
-                    await asyncio.sleep(delay)
-            return None
-        return wrapper
-    return decorator
-
 async def notify_admin(message: str):
     if ADMIN_ID:
         try:
@@ -91,7 +68,6 @@ async def on_error(update, exception):
             error_message = f"⚠️ Превышено количество попыток подключения к Telegram API ({tryings}). Бот может работать нестабильно."
             await notify_admin(error_message)
 
-@retry(max_attempts=3, delay=10)
 async def update_figi_for_all_stocks():
     logger.info("Запуск обновления FIGI для всех акций")
     async with async_session() as session:
@@ -120,6 +96,7 @@ async def update_figi_for_all_stocks():
                         original_ticker = stock.ticker
                         cleaned_ticker = original_ticker.replace('.ME', '')
                         if original_ticker != cleaned_ticker:
+                            # Проверяем, существует ли cleaned_ticker
                             existing_ticker = await session.execute(
                                 select(Stock).where(Stock.ticker == cleaned_ticker)
                             )
@@ -177,7 +154,6 @@ async def update_figi_for_all_stocks():
         except Exception as e:
             logger.error(f"Ошибка при обновлении FIGI: {e}")
             await session.rollback()
-            await notify_admin(f"⚠️ Ошибка при обновлении FIGI: {str(e)}")
 
 async def start_streaming_for_users():
     logger.info("Запуск стриминга для всех пользователей")
@@ -198,7 +174,6 @@ async def start_streaming_for_users():
                 trading_bot.stream_tasks[user.user_id] = task
         except Exception as e:
             logger.error(f"Ошибка при запуске стриминга: {e}")
-            await notify_admin(f"⚠️ Ошибка при запуске стриминга: {str(e)}")
 
 async def send_daily_reports():
     logger.info("Отправка дневных отчётов")
@@ -214,7 +189,6 @@ async def send_daily_reports():
                 await trading_bot.send_daily_profit_report(session, user.user_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке дневных отчётов: {e}")
-            await notify_admin(f"⚠️ Ошибка при отправке дневных отчётов: {str(e)}")
 
 @app.on_event("startup")
 async def on_startup():
@@ -223,8 +197,7 @@ async def on_startup():
         await init_db()
         logger.info("База данных успешно инициализирована.")
     except Exception as e:
-        logger.critical(f"Не удалось инициализировать базу данных: {e}")
-        await notify_admin(f"❌ Не удалось инициализировать базу данных: {str(e)}")
+        logger.error(f"Не удалось инициализировать базу данных: {e}")
         raise
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён, очередь обновлений очищена")
@@ -252,7 +225,7 @@ async def on_shutdown():
     logger.info("Бот полностью остановлен")
 
 @app.post("/signals")
-async def receive_signal(signal: Dict):
+async def receive_signal(signal: dict):
     ticker = signal.get("ticker")
     signal_type = signal.get("signal_type")
     value = signal.get("value")

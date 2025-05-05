@@ -1,74 +1,71 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, Enum, ForeignKey, DateTime
+# app/models.py
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.ext.asyncio import AsyncAttrs
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import ENUM as PgEnum
-import enum
+from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
-import logging
+import enum
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Определение перечисления для статуса FIGI
-class FigiStatus(enum.Enum):
-    PENDING = "pending"    # Ожидание получения FIGI
-    SUCCESS = "success"    # FIGI успешно получен
-    FAILED = "failed"      # Не удалось получить FIGI
-
-# База для всех моделей
-class Base(AsyncAttrs):
+class Base(AsyncAttrs, DeclarativeBase):
     pass
 
-# Модель пользователя
-class User(Base):
-    __tablename__ = "users"
+# Константы для FIGI статуса (используем в коде для проверки)
+class FigiStatus(enum.Enum):
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)  # ID пользователя в Telegram
-    username: Mapped[str] = mapped_column(String, nullable=True)              # Имя пользователя (опционально)
-    tinkoff_token: Mapped[str] = mapped_column(String, nullable=True)         # Токен Tinkoff API
-    autotrading_enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # Включена ли автоторговля
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
-    stocks: Mapped[list["Stock"]] = relationship(back_populates="user")
-
-    def __repr__(self):
-        return f"<User(user_id={self.user_id}, username={self.username}, autotrading={self.autotrading_enabled})>"
-
-# Модель подписки на акции
-class Subscription(Base):
-    __tablename__ = "subscriptions"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    ticker: Mapped[str] = mapped_column(String, nullable=False, unique=True)  # Тикер акции
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    user: Mapped["User"] = relationship(back_populates="subscriptions")
-
-    def __repr__(self):
-        return f"<Subscription(user_id={self.user_id}, ticker={self.ticker})>"
-
-# Модель акций
 class Stock(Base):
     __tablename__ = "stocks"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    ticker: Mapped[str] = mapped_column(String, nullable=False, unique=True)  # Тикер акции
-    figi: Mapped[str] = mapped_column(String, nullable=True)                  # FIGI от Tinkoff
-    figi_status: Mapped[str] = mapped_column(PgEnum(FigiStatus, name="figi_status"), default=FigiStatus.PENDING.value)
-    last_price: Mapped[float] = mapped_column(Float, nullable=True)           # Последняя цена
-    updated_at: Mapped[datetime] = mapped_column(DateTime, onupdate=datetime.utcnow, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, unique=True, index=True)
+    name = Column(String)
+    last_price = Column(Float)
+    volume = Column(Float)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+    figi = Column(String, nullable=True)
+    figi_status = Column(String, default=FigiStatus.PENDING.value)  # Изменено на String
 
-    user: Mapped["User"] = relationship(back_populates="stocks")
-
+    # Метод для проверки корректности значения figi_status
     def set_figi_status(self, status: FigiStatus):
-        """Устанавливает статус FIGI и логирует изменение."""
+        if status not in FigiStatus:
+            raise ValueError(f"Недопустимое значение figi_status: {status}. Допустимые значения: {[e.value for e in FigiStatus]}")
         self.figi_status = status.value
-        logger.info(f"Статус FIGI для {self.ticker} изменён на {status.value}")
 
-    def __repr__(self):
-        return f"<Stock(ticker={self.ticker}, figi={self.figi}, status={self.figi_status})>"
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, unique=True, index=True)
+    tinkoff_token = Column(String, nullable=True)
+    autotrading_enabled = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True)
+    ticker = Column(String, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class TradeHistory(Base):
+    __tablename__ = "trade_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True)
+    ticker = Column(String)
+    action = Column(String)  # "buy" or "sell"
+    price = Column(Float)
+    quantity = Column(Integer)
+    total = Column(Float)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Signal(Base):
+    __tablename__ = "signals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, index=True)
+    signal_type = Column(String)
+    value = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
