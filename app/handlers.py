@@ -11,7 +11,7 @@ import os
 import asyncio
 import html
 import aiohttp
-import moexalgo  # Added import for moexalgo
+import moexalgo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -81,9 +81,13 @@ async def calculate_indicators(prices: list) -> tuple:
 
 async def fetch_moex_data(ticker: str) -> list:
     try:
-        client = moexalgo.MoexClient()
-        candles = client.get_candles(ticker, period="1d", limit=30)
-        return [c['CLOSE'] for c in candles]
+        # Use moexalgo.Ticker to fetch historical data
+        stock = moexalgo.Ticker(ticker)
+        # Fetch daily candles for the last 30 days
+        candles = stock.candles(interval='24h', limit=30)
+        # Extract closing prices
+        prices = [candle['close'] for candle in candles if 'close' in candle]
+        return prices
     except Exception as e:
         logger.error(f"Ошибка при получении данных MOEX для {ticker}: {e}")
         return []
