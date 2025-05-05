@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
-from app.database import init_db, async_session, engine, dispose_engine
+from app.database import init_db, get_session, dispose_engine
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
@@ -50,7 +50,7 @@ bot = Bot(
 dp = Dispatcher()
 dp.include_router(router)
 trading_bot = TradingBot(bot)
-dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
+dp.update.middleware(DbSessionMiddleware(async_sessionmaker, trading_bot))
 
 dp.startup_timeout = 120
 dp.shutdown_timeout = 120
@@ -72,7 +72,7 @@ async def check_database_health():
     """Проверка состояния базы данных при запуске."""
     logger.info("Проверка состояния базы данных...")
     try:
-        async with async_session() as session:
+        async with get_session() as session:
             # Проверка подключения
             await session.execute(text("SELECT 1"))
             logger.info("Подключение к базе данных успешно.")
@@ -111,7 +111,7 @@ async def update_stocks():
     """Обновление списка акций через Tinkoff API."""
     logger.info("Запуск обновления списка акций...")
     try:
-        async with async_session() as session:
+        async with get_session() as session:
             # Получаем токен администратора для API запросов
             admin_token = os.getenv("TINKOFF_TOKEN")
             if not admin_token:
@@ -162,6 +162,15 @@ async def update_stocks():
         logger.error(f"Ошибка при обновлении акций: {e}")
         await notify_admin(f"❌ Ошибка при обновлении акций: {str(e)}")
 
+async def send_profit_report_wrapper(user_id: int):
+    """Обёртка для отправки ежедневного отчёта о прибыли."""
+    try:
+        async with get_session() as session:
+            await trading_bot.send_daily_profit_report(session, user_id)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке ежедневного отчёта: {e}")
+        await notify_admin(f"❌ Ошибка при отправке ежедневного отчёта: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Эндпоинт для проверки работоспособности приложения."""
@@ -190,7 +199,14 @@ async def on_startup():
 
         # Запуск планировщика задач
         scheduler.add_job(update_stocks, 'interval', hours=24)
-        scheduler.add_job(trading_bot.send_daily_profit_report, 'interval', hours=24, args=[async_session, int(ADMIN_ID)] if ADMIN_ID else [])
+        if ADMIN_ID:
+            scheduler.add_job(
+                send_profit_report_wrapper,
+                'interval',
+                hours=24,
+                args=[int(ADMIN_ID)],
+                id='daily_profit_report'
+            )
         scheduler.start()
         logger.info("Планировщик задач запущен.")
 
