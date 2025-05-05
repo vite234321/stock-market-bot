@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import os
 import asyncio
 import html
-from functools import lru_cache
 from typing import Optional
 import aiohttp
 
@@ -75,11 +74,6 @@ def get_autotrading_menu():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_trading")],
     ])
     return keyboard
-
-@lru_cache(maxsize=1)
-def get_cached_stocks(session: AsyncSession) -> list:
-    result = session.execute(select(Stock))
-    return result.scalars().all()
 
 async def calculate_indicators(prices: list) -> tuple:
     if len(prices) < 20:
@@ -210,7 +204,8 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список всех акций")
     try:
-        stocks = get_cached_stocks(session)
+        result = await session.execute(select(Stock))
+        stocks = result.scalars().all()
 
         if not stocks:
             await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
@@ -565,9 +560,7 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        stocks_result = await session.execute(
-            select(Stock).where(Stock.figi_status == 'SUCCESS')
-        )
+        stocks_result = await session.execute(select(Stock))
         stocks = stocks_result.scalars().all()
         if not stocks:
             await callback_query.message.answer(
@@ -583,12 +576,21 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
 
-        # Базовая торговая стратегия
+        # Игнорируем результаты бэктеста и пробуем торговать
         async with AsyncClient(user.tinkoff_token) as client:
             account_id = (await client.users.get_accounts()).accounts[0].id
             for stock in stocks:
-                if not stock.figi:
+                if stock.ticker != "SBER.ME":
                     continue
+                if not stock.figi:
+                    figi = await fetch_figi_with_retry(client, stock.ticker)
+                    if not figi:
+                        logger.warning(f"Не удалось получить FIGI для {stock.ticker}, пропускаем...")
+                        continue
+                    stock.figi = figi
+                    session.add(stock)
+                    await session.commit()
+
                 candles = await client.market_data.get_candles(
                     figi=stock.figi,
                     from_=datetime.utcnow() - timedelta(days=30),
@@ -597,28 +599,31 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
                 )
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
                 rsi, _, _, _, _ = await calculate_indicators(prices)
-                if rsi and rsi < 30 and stock.ticker == "SBER.ME":
+                if rsi and rsi < 30:
                     logger.info(f"Покупка акции {stock.ticker} по стратегии RSI < 30")
+                    last_price = (await client.market_data.get_last_prices(figi=[stock.figi])).last_prices[0].price
+                    last_price_value = last_price.units + last_price.nano / 1e9
                     order = await client.orders.post_order(
                         figi=stock.figi,
                         quantity=1,
-                        price=await client.market_data.get_last_prices(figi=[stock.figi]).last_prices[0].price,
+                        price=last_price,
                         direction=OrderDirection.ORDER_DIRECTION_BUY,
                         account_id=account_id,
-                        order_type="OrderType.LIMIT"
+                        order_type="LIMIT"
                     )
                     trade = TradeHistory(
                         user_id=user_id,
                         ticker=stock.ticker,
                         action="buy",
                         quantity=1,
-                        price=prices[-1],
-                        total=prices[-1],
+                        price=last_price_value,
+                        total=last_price_value,
                         created_at=datetime.utcnow()
                     )
                     session.add(trade)
                     await session.commit()
-                    await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {prices[-1]:.2f} RUB")
+                    await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {last_price_value:.2f} RUB")
+                    break  # Покупаем только одну акцию для теста
 
         await callback_query.message.answer(
             "▶️ Автоторговля включена!",
