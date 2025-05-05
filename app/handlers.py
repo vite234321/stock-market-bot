@@ -17,8 +17,10 @@ import aiohttp
 try:
     import tinkoff
     from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
+    # Убедимся, что логи не отправляются в Telegram
+    logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
     logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
 except ImportError as e:
     logging.basicConfig(level=logging.ERROR)
@@ -248,7 +250,9 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
 
         response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
-            status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
+            # Проверяем figi_status, если None, то отображаем как "UNKNOWN"
+            status = stock.figi_status if stock.figi_status else "UNKNOWN"
+            status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
             price = stock.last_price if stock.last_price is not None else "N/A"
             response += f"{status_icon} {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
         response += "\n⬅️ Вернуться в меню акций."
@@ -350,7 +354,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет подписаться на акции")
-    await callback_query.message.answer("🔔 Введите тикer акции для подписки (например, SBER.ME):")
+    await callback_query.message.answer("🔔 Введите тикер акции для подписки (например, SBER.ME):")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "signals")
@@ -633,9 +637,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             "▶️ Автоторговля включена!",
             reply_markup=get_autotrading_menu()
         )
-        await callback_query.message.answer(
-            "🤖 Бот начал анализ рынка и поиск возможностей для торговли."
-        )
     except Exception as e:
         logger.error(f"Ошибка при включении автоторговли для пользователя {user_id}: {str(e)}")
         error_message = "❌ Ошибка при включении автоторговли: "
@@ -673,7 +674,6 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
         trading_bot.stop_streaming(user_id)
 
         await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
-        await callback_query.message.answer("🤖 Бот прекратил торговлю.")
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")
@@ -734,4 +734,27 @@ async def balance(callback_query: CallbackQuery, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при получении баланса для пользователя {user_id}: {e}")
         await callback_query.message.answer("❌ Ошибка при получении баланса.")
+    await callback_query.answer()
+
+@router.callback_query(lambda c: c.data == "daily_stats")
+async def daily_stats(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил дневную статистику")
+    try:
+        from app.trading import TradingBot
+        trading_bot = TradingBot(None)
+        stats = await trading_bot.calculate_daily_profit(session, user_id)
+        today = datetime.utcnow().date()
+        response = (
+            f"📅 <b>Дневная статистика ({today.strftime('%Y-%m-%d')}):</b>\n\n"
+            f"🔄 Сделок: {stats['total_trades']}\n"
+            f"📉 Покупок: {stats['total_buy']:.2f} RUB\n"
+            f"📈 Продаж: {stats['total_sell']:.2f} RUB\n"
+            f"📊 Прибыль: {stats['profit']:.2f} RUB\n"
+            f"\n⬅️ Вернуться в меню торговли."
+        )
+        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_trading_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики: {e}")
+        await callback_query.message.answer("❌ Ошибка при получении статистики.")
     await callback_query.answer()
