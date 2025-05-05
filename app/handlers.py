@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import os
 import asyncio
 import html
+from functools import lru_cache
+from typing import Optional
 
 # Проверка установки tinkoff-invest
 try:
@@ -72,6 +74,35 @@ def get_autotrading_menu():
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_trading")],
     ])
     return keyboard
+
+@lru_cache(maxsize=1)
+def get_cached_stocks(session: AsyncSession) -> list:
+    result = session.execute(select(Stock))
+    return result.scalars().all()
+
+async def calculate_indicators(prices: list) -> tuple:
+    if len(prices) < 20:
+        return None, None, None, None, None
+
+    # RSI (упрощённый расчёт)
+    avg_gain = sum(max(0, prices[i] - prices[i-1]) for i in range(1, len(prices))) / len(prices[1:])
+    avg_loss = sum(max(0, prices[i-1] - prices[i]) for i in range(1, len(prices))) / len(prices[1:])
+    rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss else 100
+
+    # MACD
+    ema_fast = sum(prices[-6:]) / 6
+    ema_slow = sum(prices[-13:-7]) / 6
+    macd = ema_fast - ema_slow
+    signal = sum(prices[-4:]) / 4
+    histogram = macd - signal
+
+    # Bollinger Bands
+    sma = sum(prices[-20:]) / 20
+    std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
+    upper_band = sma + 2 * std
+    lower_band = sma - 2 * std
+
+    return rsi, macd, signal, upper_band, lower_band
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -152,15 +183,20 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список всех акций")
     try:
-        result = await session.execute(select(Stock))
-        stocks = result.scalars().all()
+        stocks = get_cached_stocks(session)
 
         if not stocks:
             await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
             await callback_query.answer()
             return
 
-        async with AsyncClient() as client:
+        user_result = await session.execute(select(User).where(User.user_id == user_id))
+        user = user_result.scalars().first()
+        if not user or not user.tinkoff_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            return
+
+        async with AsyncClient(user.tinkoff_token) as client:
             response = "📈 <b>Все доступные акции:</b>\n\n"
             for stock in stocks:
                 if not stock.figi:
@@ -172,11 +208,29 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
                             id=cleaned_ticker
                         )
                         stock.figi = instrument.instrument.figi
+                        stock.figi_status = "SUCCESS"
                         session.add(stock)
                         await session.commit()
                     except InvestError as e:
-                        logger.warning(f"Не удалось получить FIGI для {stock.ticker}: {e}")
-                        continue
+                        if "RESOURCE_EXHAUSTED" in str(e):
+                            reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                            logger.warning(f"Лимит запросов превышен, ожидание {reset_time} секунд...")
+                            await asyncio.sleep(reset_time)
+                            instrument = await client.instruments.share_by(
+                                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                                class_code="TQBR",
+                                id=cleaned_ticker
+                            )
+                            stock.figi = instrument.instrument.figi
+                            stock.figi_status = "SUCCESS"
+                            session.add(stock)
+                            await session.commit()
+                        else:
+                            logger.warning(f"Не удалось получить FIGI для {stock.ticker}: {e}")
+                            stock.figi_status = "FAILED"
+                            session.add(stock)
+                            await session.commit()
+                            continue
 
                 status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
                 price = stock.last_price if stock.last_price is not None else "N/A"
@@ -204,7 +258,7 @@ async def prompt_price_chart(callback_query: CallbackQuery):
     await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER.ME):")
     await callback_query.answer()
 
-async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession):
+async def update_figi(client: AsyncClient, stock: Stock, session: AsyncSession) -> Optional[str]:
     try:
         response = await client.instruments.share_by(
             id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
@@ -354,40 +408,39 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
 
                 end_date = datetime.utcnow()
                 start_date = end_date - timedelta(days=30)
-                candles = await client.market_data.get_candles(
-                    figi=stock.figi,
-                    from_=start_date,
-                    to=end_date,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
-                )
+                try:
+                    candles = await client.market_data.get_candles(
+                        figi=stock.figi,
+                        from_=start_date,
+                        to=end_date,
+                        interval=CandleInterval.CANDLE_INTERVAL_DAY
+                    )
+                except InvestError as e:
+                    logger.warning(f"Ошибка получения свечей для {stock.ticker}: {e}")
+                    continue
 
                 if not candles.candles or len(candles.candles) < 20:
                     logger.warning(f"Недостаточно данных для {stock.ticker}")
                     continue
 
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-                rsi = (sum(prices[-7:]) - sum(prices[-14:-7])) / 7 if len(prices) >= 14 else None
-                if rsi is not None:
-                    rsi = 100 - (100 / (1 + rsi)) if rsi > 0 else 100
-                macd = sum(prices[-6:]) - sum(prices[-13:-6])
-                signal = sum(prices[-4:]) / 4 if len(prices) >= 4 else 0
-                histogram = macd - signal
-                sma = sum(prices[-20:]) / 20
-                std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
-                upper_band = sma + 2 * std
-                lower_band = sma - 2 * std
-                current_price = prices[-1]
+                rsi, macd, signal, upper_band, lower_band = await calculate_indicators(prices)
 
+                if rsi is None:
+                    continue
+
+                current_price = prices[-1]
                 signal_text = ""
-                if rsi is not None and rsi < 30 and histogram > 0 and current_price < lower_band:
-                    signal_text = "📈 Сигнал на покупку: RSI низкий, MACD положительный, цена ниже Bollinger Lower"
-                elif rsi is not None and rsi > 70 and current_price > upper_band:
-                    signal_text = "📉 Сигнал на продажу: RSI высокий, цена выше Bollinger Upper"
+                if rsi < 30 and macd > signal and current_price < lower_band:
+                    signal_text = "📈 Сигнал на покупку: RSI < 30, MACD > Signal, цена ниже нижней Bollinger Band"
+                elif rsi > 70 and current_price > upper_band:
+                    signal_text = "📉 Сигнал на продажу: RSI > 70, цена выше верхней Bollinger Band"
 
                 if signal_text:
                     response += f"🔹 {stock.ticker} ({stock.name})\n"
                     response += f"💰 Цена: {current_price:.2f} RUB\n"
-                    response += f"📊 {signal_text}\n\n"
+                    response += f"📊 {signal_text}\n"
+                    response += f"📈 RSI: {rsi:.2f}, MACD: {macd:.2f}, Signal: {signal:.2f}\n\n"
 
             if not response.strip().endswith("📊 <b>Сигналы роста:</b>\n\n"):
                 response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
@@ -494,7 +547,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} пытается включить автоторговлю")
     try:
-        # Проверка пользователя
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
         if not user:
@@ -504,7 +556,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        # Проверка токена
         if not user.tinkoff_token:
             await callback_query.message.answer(
                 "❌ Токен T-Invest API не установлен. Установите его в меню настроек.",
@@ -512,7 +563,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        # Проверка статуса автоторговли
         if user.autotrading_enabled:
             await callback_query.message.answer(
                 "⚠️ Автоторговля уже включена!",
@@ -520,7 +570,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        # Проверка наличия доступных акций
         stocks_result = await session.execute(
             select(Stock).where(Stock.figi_status == 'SUCCESS')
         )
@@ -532,14 +581,10 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             )
             return
 
-        # Включение автоторговли
         user.autotrading_enabled = True
         await session.commit()
 
-        # Остановка существующих задач стриминга
         trading_bot.stop_streaming(user_id)
-
-        # Запуск стриминга
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
 
