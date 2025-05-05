@@ -17,6 +17,7 @@ import httpx
 from sklearn.linear_model import LinearRegression
 import numpy as np
 from typing import Dict, List, Optional
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ class TradingBot:
             return None
 
     async def fetch_news(self, ticker: str) -> List[Dict]:
-        api_key = "YOUR_NEWSAPI_KEY"
+        api_key = os.getenv("NEWSAPI_KEY")
         if not api_key:
             logger.warning("NewsAPI ключ не установлен, новости не будут проверяться")
             return []

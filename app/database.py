@@ -5,8 +5,10 @@ from sqlalchemy.exc import OperationalError
 from app.models import Base
 from contextlib import asynccontextmanager
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)  # Логирование SQL-запросов
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -22,7 +24,6 @@ def create_async_engine():
     try:
         return create_async_engine(
             DATABASE_URL,
-            echo=False,
             pool_size=5,
             max_overflow=10,
             pool_timeout=30,
