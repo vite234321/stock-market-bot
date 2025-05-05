@@ -50,7 +50,6 @@ bot = Bot(
 dp = Dispatcher()
 dp.include_router(router)
 trading_bot = TradingBot(bot)
-dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
 
 dp.startup_timeout = 120
 dp.shutdown_timeout = 120
@@ -193,6 +192,9 @@ async def on_startup():
         # Инициализация базы данных
         await init_db()
         logger.info("База данных инициализирована.")
+
+        # Регистрация middleware после инициализации базы данных
+        dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
 
         # Проверка состояния базы данных
         await check_database_health()
