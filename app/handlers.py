@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import os
 import asyncio
 import html
-from typing import Optional
 import aiohttp
+import moexalgo  # Added import for moexalgo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
