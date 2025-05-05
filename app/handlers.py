@@ -160,20 +160,36 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.answer()
             return
 
-        response = "📈 <b>Все доступные акции:</b>\n\n"
-        for stock in stocks:
-            price = stock.last_price if stock.last_price is not None else "N/A"
-            status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
-            response += f"{status_icon} {stock.ticker} - {stock.name}\n"
-            response += f"💰 Цена: {price} RUB\n"
-            response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
-            response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
+        async with AsyncClient() as client:
+            response = "📈 <b>Все доступные акции:</b>\n\n"
+            for stock in stocks:
+                if not stock.figi:
+                    try:
+                        cleaned_ticker = stock.ticker.replace(".ME", "")
+                        instrument = await client.instruments.share_by(
+                            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                            class_code="TQBR",
+                            id=cleaned_ticker
+                        )
+                        stock.figi = instrument.instrument.figi
+                        session.add(stock)
+                        await session.commit()
+                    except InvestError as e:
+                        logger.warning(f"Не удалось получить FIGI для {stock.ticker}: {e}")
+                        continue
+
+                status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
+                price = stock.last_price if stock.last_price is not None else "N/A"
+                response += f"{status_icon} {stock.ticker} - {stock.name}\n"
+                response += f"💰 Цена: {price} RUB\n"
+                response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
+                response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
         
         response += "⬅️ Вернуться в меню акций."
         await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении списка акций.")
+        await callback_query.message.answer("Произошла ошибка при получении списка акций. Проверьте подключение к Tinkoff API.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "check_price")
@@ -298,15 +314,89 @@ async def prompt_subscribe(callback_query: CallbackQuery):
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "signals")
-async def prompt_signals(callback_query: CallbackQuery):
-    logger.info(f"Пользователь {callback_query.from_user.id} запросил сигналы")
-    await callback_query.message.answer("📊 Введите тикер акции для проверки сигналов (например, SBER.ME):")
-    await callback_query.answer()
+async def signals(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил сигналы роста")
+    try:
+        result = await session.execute(
+            select(Subscription.ticker).where(Subscription.user_id == user_id)
+        )
+        subscribed_tickers = result.scalars().all()
 
-@router.callback_query(lambda c: c.data == "set_token")
-async def prompt_set_token(callback_query: CallbackQuery):
-    logger.info(f"Пользователь {callback_query.from_user.id} хочет установить токен")
-    await callback_query.message.answer("🔑 Введите ваш токен T-Invest API (должен начинаться с t.):")
+        if not subscribed_tickers:
+            await callback_query.message.answer("Вы не подписаны ни на одну акцию. Нажмите 'Подписаться' в меню акций.")
+            return
+
+        result = await session.execute(
+            select(Stock).where(Stock.ticker.in_(subscribed_tickers))
+        )
+        stocks = result.scalars().all()
+
+        if not stocks:
+            await callback_query.message.answer("Акции не найдены. Попробуйте позже.")
+            return
+
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = user_result.scalars().first()
+        if not user or not user.tinkoff_token:
+            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            return
+
+        async with AsyncClient(user.tinkoff_token) as client:
+            response = "📊 <b>Сигналы роста:</b>\n\n"
+            for stock in stocks:
+                if not stock.figi:
+                    figi = await update_figi(client, stock, session)
+                    if not figi:
+                        continue
+
+                end_date = datetime.utcnow()
+                start_date = end_date - timedelta(days=30)
+                candles = await client.market_data.get_candles(
+                    figi=stock.figi,
+                    from_=start_date,
+                    to=end_date,
+                    interval=CandleInterval.CANDLE_INTERVAL_DAY
+                )
+
+                if not candles.candles or len(candles.candles) < 20:
+                    logger.warning(f"Недостаточно данных для {stock.ticker}")
+                    continue
+
+                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+                rsi = (sum(prices[-7:]) - sum(prices[-14:-7])) / 7 if len(prices) >= 14 else None
+                if rsi is not None:
+                    rsi = 100 - (100 / (1 + rsi)) if rsi > 0 else 100
+                macd = sum(prices[-6:]) - sum(prices[-13:-6])
+                signal = sum(prices[-4:]) / 4 if len(prices) >= 4 else 0
+                histogram = macd - signal
+                sma = sum(prices[-20:]) / 20
+                std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
+                upper_band = sma + 2 * std
+                lower_band = sma - 2 * std
+                current_price = prices[-1]
+
+                signal_text = ""
+                if rsi is not None and rsi < 30 and histogram > 0 and current_price < lower_band:
+                    signal_text = "📈 Сигнал на покупку: RSI низкий, MACD положительный, цена ниже Bollinger Lower"
+                elif rsi is not None and rsi > 70 and current_price > upper_band:
+                    signal_text = "📉 Сигнал на продажу: RSI высокий, цена выше Bollinger Upper"
+
+                if signal_text:
+                    response += f"🔹 {stock.ticker} ({stock.name})\n"
+                    response += f"💰 Цена: {current_price:.2f} RUB\n"
+                    response += f"📊 {signal_text}\n\n"
+
+            if not response.strip().endswith("📊 <b>Сигналы роста:</b>\n\n"):
+                response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
+
+            response += "⬅️ Вернуться в меню акций."
+            await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при получении сигналов: {e}")
+        await callback_query.message.answer("Произошла ошибка при получении сигналов. Проверьте подключение к Tinkoff API.")
     await callback_query.answer()
 
 @router.message(lambda message: message.text.startswith('t.'))
