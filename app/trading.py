@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from app.models import Stock, Subscription, TradeHistory, User, FigiStatus
-from app.database import get_session
+from app.database import async_session
 from datetime import datetime, timedelta
 from tinkoff.invest import (
     AsyncClient, OrderDirection, OrderType, CandleInterval, InstrumentIdType,
@@ -426,7 +426,7 @@ class TradingBot:
         self.running = True
 
         try:
-            async with get_session() as session:  # Используем контекстный менеджер для сессии
+            async with async_session() as session:
                 try:
                     user_result = await session.execute(
                         select(User).where(User.user_id == user_id)
@@ -465,7 +465,7 @@ class TradingBot:
                     return
                 account_id = accounts.accounts[0].id
 
-                async with get_session() as session:  # Получаем сессию для акций
+                async with async_session() as session:
                     try:
                         all_stocks_result = await session.execute(
                             select(Stock).where(Stock.figi_status != 'FAILED')
@@ -484,7 +484,7 @@ class TradingBot:
                     return
 
                 figis_to_subscribe = []
-                async with get_session() as session:
+                async with async_session() as session:
                     for stock in all_stocks:
                         figi = stock.figi
                         if not figi:
@@ -552,7 +552,7 @@ class TradingBot:
                 )
 
                 self.streaming_client = client
-                async with get_session() as session:
+                async with async_session() as session:
                     async for response in client.market_data_stream.market_data_stream(subscribe_request):
                         if not self.running:
                             logger.info("Остановка стриминга")
