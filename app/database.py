@@ -14,72 +14,110 @@ if not DATABASE_URL:
     logger.error("DATABASE_URL не установлен в переменных окружения")
     raise ValueError("DATABASE_URL не установлен в переменных окружения")
 
-# Заменяем префикс для совместимости с asyncpg
+# Заменяем префикс для совместимости с psycopg
 if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+elif DATABASE_URL.startswith("postgresql+asyncpg://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
 logger.info(f"Используемый DATABASE_URL: {DATABASE_URL[:50]}... (обрезан для логов)")
 
-# Создаём асинхронный движок с отключённым кэшем подготовленных запросов
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=True,
-    pool_size=2,           # Уменьшаем размер пула для Heroku
-    max_overflow=3,        # Уменьшаем количество дополнительных соединений
-    pool_timeout=30,       # Таймаут ожидания соединения
-    pool_pre_ping=True,    # Проверяем соединения перед использованием
-    connect_args={
-        "statement_cache_size": 0,  # Отключаем кэш подготовленных запросов
-        "server_settings": {
-            "application_name": "trading-bot",  # Имя приложения для отслеживания в PgBouncer
-        }
-    }
-)
+engine = None
+async_session = None
 
-async_session = async_sessionmaker(
-    engine,
-    expire_on_commit=False,
-    class_=AsyncSession
-)
+def create_engine_wrapper():
+    """Создание асинхронного движка SQLAlchemy."""
+    try:
+        logger.info("Создание асинхронного движка SQLAlchemy...")
+        engine = create_async_engine(
+            DATABASE_URL,
+            echo=True,
+            pool_size=2,
+            max_overflow=3,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            connect_args={
+                "statement_cache_size": 0,
+                "server_settings": {
+                    "application_name": "trading-bot",
+                }
+            }
+        )
+        logger.info("Движок SQLAlchemy успешно создан")
+        return engine
+    except Exception as e:
+        logger.error(f"Ошибка при создании движка базы данных: {e}")
+        raise
 
 async def init_db():
-    logger.info("Инициализация базы данных...")
+    """Инициализация базы данных и создание таблиц с повторными попытками."""
+    global engine, async_session
+    logger.info("Начало инициализации базы данных")
     for attempt in range(1, 6):  # 5 попыток
         try:
+            logger.info("Попытка %d: подключение к базе данных", attempt)
+            engine = create_engine_wrapper()
+            logger.info("Попытка создания таблиц...")
             async with engine.begin() as conn:
-                # Проверяем подключение и логируем версию PostgreSQL
-                try:
-                    version = await conn.scalar(text("SELECT pg_catalog.version()"))
-                    logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
-                except Exception as e:
-                    logger.error(f"Ошибка при проверке версии PostgreSQL: {str(e)}")
-                    raise
-
-                # Создание таблиц
-                from app.models import Base
+                logger.info("Соединение с базой данных успешно установлено")
                 await conn.run_sync(Base.metadata.create_all)
-                logger.info("Все таблицы успешно созданы или уже существуют.")
-                return
+                logger.info("Все таблицы успешно созданы или уже существуют")
+            global async_session
+            async_session = async_sessionmaker(
+                engine,
+                expire_on_commit=False,
+                class_=AsyncSession
+            )
+            logger.info("async_session инициализирован")
+            logger.info("База данных успешно инициализирована")
+            return
         except OperationalError as e:
-            logger.error(f"Ошибка подключения к базе данных на попытке {attempt}: {str(e)}")
+            logger.error(f"Ошибка подключения к базе данных на попытке {attempt}: {e}")
             if attempt == 5:
-                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                logger.error("Не удалось подключиться к базе данных после 5 попыток")
                 raise
-            await asyncio.sleep(5)  # Задержка 5 секунд перед следующей попыткой
+            await asyncio.sleep(5)
         except DatabaseError as e:
-            logger.error(f"Ошибка базы данных при инициализации на попытке {attempt}: {str(e)}")
+            logger.error(f"Ошибка базы данных при инициализации на попытке {attempt}: {e}")
             if attempt == 5:
-                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                logger.error("Не удалось подключиться к базе данных после 5 попыток")
                 raise
-            await asyncio.sleep(5)
         except Exception as e:
-            logger.error(f"Неизвестная ошибка при инициализации базы данных на попытке {attempt}: {str(e)}")
+            logger.error(f"Неизвестная ошибка при инициализации базы данных на попытке {attempt}: {e}")
             if attempt == 5:
-                logger.error("Не удалось подключиться к базе данных после 5 попыток.")
+                logger.error("Не удалось подключиться к базе данных после 5 попыток")
                 raise
-            await asyncio.sleep(5)
-    logger.info("База данных успешно инициализирована.")
+    logger.error("init_db завершился без успешной инициализации")
+    raise RuntimeError("Не удалось инициализировать базу данных")
 
 async def dispose_engine():
-    logger.info("Закрытие соединения с базой данных...")
-    await engine.dispose()
-    logger.info("Соединение с базой данных закрыто")
+    """Закрытие движка базы данных."""
+    global engine
+    if engine:
+        try:
+            await engine.dispose()
+            logger.info("Движок базы данных закрыт")
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии движка базы данных: {e}")
+        finally:
+            engine = None
+
+@asynccontextmanager
+async def get_session():
+    """Контекстный менеджер для получения сессии базы данных."""
+    global async_session
+    if async_session is None:
+        logger.error("Сессия базы данных не инициализирована")
+        raise RuntimeError("Сессия базы данных не инициализирована")
+    async with async_session() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Ошибка в сессии базы данных: {e}")
+            raise
+        finally:
+            await session.close()
+
+# Базовый класс для моделей SQLAlchemy
+Base = DeclarativeBase()
