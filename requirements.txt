@@ -4,7 +4,7 @@ apscheduler==3.10.4
 asyncpg==0.29.0
 fastapi==0.111.0
 matplotlib==3.9.0
-moexalgo==1.5.2
+moexalgo==2.0.0
 numpy==1.26.4
 python-telegram-bot==21.2
 sqlalchemy==2.0.31
