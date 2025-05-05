@@ -17,7 +17,7 @@ import aiohttp
 # Проверка установки tinkoff-invest
 try:
     import tinkoff
-    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType
+    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
@@ -217,44 +217,20 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.answer()
             return
 
-        user_result = await session.execute(select(User).where(User.user_id == user_id))
-        user = user_result.scalars().first()
-        if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
-            return
-
-        async with AsyncClient(user.tinkoff_token) as client:
-            response = "📈 <b>Все доступные акции:</b>\n\n"
-            for stock in stocks:
-                if not stock.figi:
-                    figi = await fetch_figi_with_retry(client, stock.ticker)
-                    if figi:
-                        stock.figi = figi
-                        stock.figi_status = "SUCCESS"
-                        session.add(stock)
-                        await session.commit()
-                    else:
-                        stock.figi_status = "FAILED"
-                        session.add(stock)
-                        await session.commit()
-                        logger.warning(f"Пропущена акция {stock.ticker} из-за невозможности получить FIGI")
-                        continue
-
-                # Ограничение на количество запросов
-                await asyncio.sleep(0.5)  # Задержка 0.5 секунды между запросами
-
-                status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
-                price = stock.last_price if stock.last_price is not None else "N/A"
-                response += f"{status_icon} {stock.ticker} - {stock.name}\n"
-                response += f"💰 Цена: {price} RUB\n"
-                response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
-                response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
+        response = "📈 <b>Все доступные акции:</b>\n\n"
+        for stock in stocks:
+            status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
+            price = stock.last_price if stock.last_price is not None else "N/A"
+            response += f"{status_icon} {stock.ticker} - {stock.name}\n"
+            response += f"💰 Цена: {price} RUB\n"
+            response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
+            response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
 
         response += "⬅️ Вернуться в меню акций."
         await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении списка акций. Проверьте подключение к Tinkoff API.")
+        await callback_query.message.answer("Произошла ошибка при получении списка акций.")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "check_price")
@@ -606,6 +582,43 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         trading_bot.stop_streaming(user_id)
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
+
+        # Базовая торговая стратегия
+        async with AsyncClient(user.tinkoff_token) as client:
+            account_id = (await client.users.get_accounts()).accounts[0].id
+            for stock in stocks:
+                if not stock.figi:
+                    continue
+                candles = await client.market_data.get_candles(
+                    figi=stock.figi,
+                    from_=datetime.utcnow() - timedelta(days=30),
+                    to=datetime.utcnow(),
+                    interval=CandleInterval.CANDLE_INTERVAL_DAY
+                )
+                prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
+                rsi, _, _, _, _ = await calculate_indicators(prices)
+                if rsi and rsi < 30 and stock.ticker == "SBER.ME":
+                    logger.info(f"Покупка акции {stock.ticker} по стратегии RSI < 30")
+                    order = await client.orders.post_order(
+                        figi=stock.figi,
+                        quantity=1,
+                        price=await client.market_data.get_last_prices(figi=[stock.figi]).last_prices[0].price,
+                        direction=OrderDirection.ORDER_DIRECTION_BUY,
+                        account_id=account_id,
+                        order_type="OrderType.LIMIT"
+                    )
+                    trade = TradeHistory(
+                        user_id=user_id,
+                        ticker=stock.ticker,
+                        action="buy",
+                        quantity=1,
+                        price=prices[-1],
+                        total=prices[-1],
+                        created_at=datetime.utcnow()
+                    )
+                    session.add(trade)
+                    await session.commit()
+                    await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {prices[-1]:.2f} RUB")
 
         await callback_query.message.answer(
             "▶️ Автоторговля включена!",
