@@ -3,7 +3,7 @@ import asyncio
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.exc import OperationalError
-from app.models import Base
+from sqlalchemy.orm import declarative_base
 from contextlib import asynccontextmanager
 import re
 
@@ -21,11 +21,17 @@ if not DATABASE_URL:
     logger.error("Переменная окружения DATABASE_URL не установлена")
     raise ValueError("Переменная окружения DATABASE_URL не установлена")
 
-# Проверка формата DATABASE_URL
-if not re.match(r'^postgresql\+asyncpg://', DATABASE_URL):
+# Проверка и преобразование формата DATABASE_URL
+if not re.match(r'^postgresql\+psycopg://', DATABASE_URL):
     if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-        logger.info("DATABASE_URL преобразован из postgres:// в postgresql+asyncpg://")
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg://", 1)
+        logger.info("DATABASE_URL преобразован из postgres:// в postgresql+psycopg://")
+    elif DATABASE_URL.startswith("postgresql://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
+        logger.info("DATABASE_URL преобразован из postgresql:// в postgresql+psycopg://")
+    elif DATABASE_URL.startswith("postgresql+asyncpg://"):
+        DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
+        logger.info("DATABASE_URL преобразован из postgresql+asyncpg:// в postgresql+psycopg://")
     else:
         logger.error("Недопустимый формат DATABASE_URL: %s", DATABASE_URL)
         raise ValueError(f"Недопустимый формат DATABASE_URL: {DATABASE_URL}")
@@ -33,6 +39,7 @@ if not re.match(r'^postgresql\+asyncpg://', DATABASE_URL):
 logger.info("Строка подключения к базе данных: %s", DATABASE_URL)
 
 engine = None
+async_session = None
 
 def create_engine_wrapper():
     """Создание асинхронного движка SQLAlchemy."""
@@ -41,7 +48,8 @@ def create_engine_wrapper():
         engine = create_async_engine(
             DATABASE_URL,
             echo=True,
-            connect_args={"timeout": 30, "statement_cache_size": 0}  # Отключение кэша подготовленных выражений
+            pool_pre_ping=True,
+            connect_args={"connect_timeout": 30}
         )
         logger.info("Движок SQLAlchemy успешно создан: %s", engine)
         return engine
@@ -50,8 +58,8 @@ def create_engine_wrapper():
         raise
 
 async def init_db():
-    """Инициализация базы данных и создание таблиц с повторными попытками. Возвращает async_session."""
-    global engine
+    """Инициализация базы данных и создание таблиц с повторными попытками."""
+    global engine, async_session
     logger.info("Начало инициализации базы данных")
     for attempt in range(1, 6):  # 5 попыток
         try:
@@ -69,7 +77,7 @@ async def init_db():
             )
             logger.info("async_session инициализирован: %s", async_session)
             logger.info("База данных успешно инициализирована")
-            return async_session  # Возвращаем async_session
+            return  # Успех, выходим из функции
         except OperationalError as e:
             logger.error(f"Ошибка подключения к базе данных на попытке %d: {e}", attempt)
             if attempt == 5:
@@ -83,7 +91,7 @@ async def init_db():
                 raise
         finally:
             # Закрываем движок только в случае неудачи
-            if engine and attempt < 5:
+            if engine and async_session is None and attempt < 5:
                 await engine.dispose()
                 logger.info("Движок базы данных закрыт после неудачной попытки")
     logger.error("init_db завершился без успешной инициализации")
@@ -102,8 +110,9 @@ async def dispose_engine():
             engine = None
 
 @asynccontextmanager
-async def get_session(async_session):
+async def get_session():
     """Контекстный менеджер для получения сессии базы данных."""
+    global async_session
     if async_session is None:
         logger.error("Сессия базы данных не инициализирована")
         raise RuntimeError("Сессия базы данных не инициализирована")
@@ -117,3 +126,6 @@ async def get_session(async_session):
             raise
         finally:
             await session.close()
+
+# Базовый класс для моделей SQLAlchemy
+Base = declarative_base()

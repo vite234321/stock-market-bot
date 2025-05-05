@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
-from app.database import init_db, get_session, dispose_engine
+from app.database import init_db, get_session, dispose_engine, async_session
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
@@ -67,11 +67,11 @@ async def notify_admin(message: str):
         except Exception as e:
             logger.error(f"Ошибка при отправке уведомления администратору: {e}")
 
-async def check_database_health(async_session):
+async def check_database_health():
     """Проверка состояния базы данных при запуске."""
     logger.info("Проверка состояния базы данных...")
     try:
-        async with get_session(async_session) as session:
+        async with get_session() as session:
             # Проверка подключения
             await session.execute(text("SELECT 1"))
             logger.info("Подключение к базе данных успешно.")
@@ -107,11 +107,11 @@ async def check_database_health(async_session):
         await notify_admin(f"❌ Неожиданная ошибка при запуске: {str(e)}")
         raise
 
-async def update_stocks(async_session):
+async def update_stocks():
     """Обновление списка акций через Tinkoff API."""
     logger.info("Запуск обновления списка акций...")
     try:
-        async with get_session(async_session) as session:
+        async with get_session() as session:
             # Получаем токен администратора для API запросов
             admin_token = os.getenv("TINKOFF_TOKEN")
             if not admin_token:
@@ -162,10 +162,10 @@ async def update_stocks(async_session):
         logger.error(f"Ошибка при обновлении акций: {e}")
         await notify_admin(f"❌ Ошибка при обновлении акций: {str(e)}")
 
-async def send_profit_report_wrapper(user_id: int, async_session):
+async def send_profit_report_wrapper(user_id: int):
     """Обёртка для отправки ежедневного отчёта о прибыли."""
     try:
-        async with get_session(async_session) as session:
+        async with get_session() as session:
             await trading_bot.send_daily_profit_report(session, user_id)
     except Exception as e:
         logger.error(f"Ошибка при отправке ежедневного отчёта: {e}")
@@ -192,7 +192,7 @@ async def on_startup():
     try:
         # Инициализация базы данных
         logger.info("Вызов init_db...")
-        async_session = await init_db()
+        await init_db()
         logger.info("init_db завершён, проверка async_session...")
         logger.info(f"async_session: {async_session}")
         if async_session is None:
@@ -203,16 +203,16 @@ async def on_startup():
         logger.info("DbSessionMiddleware зарегистрирован")
 
         # Проверка состояния базы данных
-        await check_database_health(async_session)
+        await check_database_health()
 
         # Запуск планировщика задач
-        scheduler.add_job(update_stocks, 'interval', hours=24, args=[async_session])
+        scheduler.add_job(update_stocks, 'interval', hours=24)
         if ADMIN_ID:
             scheduler.add_job(
                 send_profit_report_wrapper,
                 'interval',
                 hours=24,
-                args=[int(ADMIN_ID), async_session],
+                args=[int(ADMIN_ID)],
                 id='daily_profit_report'
             )
         scheduler.start()
