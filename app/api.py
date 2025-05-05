@@ -193,8 +193,14 @@ async def on_startup():
         await init_db()
         logger.info("База данных инициализирована.")
 
-        # Регистрация middleware после инициализации базы данных
+        # Проверка и регистрация middleware
+        logger.info(f"async_session: {async_session}")
+        if async_session is None:
+            logger.error("async_session не инициализирован, middleware не зарегистрирован")
+            await notify_admin("❌ Ошибка: async_session не инициализирован")
+            raise ValueError("async_session не инициализирован")
         dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
+        logger.info("DbSessionMiddleware зарегистрирован")
 
         # Проверка состояния базы данных
         await check_database_health()
@@ -228,8 +234,11 @@ async def on_shutdown():
     logger.info("Завершение работы приложения...")
     try:
         # Остановка планировщика
-        scheduler.shutdown()
-        logger.info("Планировщик задач остановлен.")
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("Планировщик задач остановлен.")
+        else:
+            logger.info("Планировщик уже остановлен.")
 
         # Остановка бота
         await dp.stop_polling()
@@ -248,6 +257,12 @@ async def on_shutdown():
     except Exception as e:
         logger.error(f"Ошибка при завершении работы: {e}")
         await notify_admin(f"❌ Ошибка при остановке бота: {str(e)}")
+    finally:
+        # Принудительное завершение всех задач
+        tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        logger.info("Все асинхронные задачи отменены.")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
