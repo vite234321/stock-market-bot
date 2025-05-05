@@ -12,6 +12,7 @@ import asyncio
 import html
 from functools import lru_cache
 from typing import Optional
+import aiohttp
 
 # Проверка установки tinkoff-invest
 try:
@@ -84,25 +85,51 @@ async def calculate_indicators(prices: list) -> tuple:
     if len(prices) < 20:
         return None, None, None, None, None
 
-    # RSI (упрощённый расчёт)
-    avg_gain = sum(max(0, prices[i] - prices[i-1]) for i in range(1, len(prices))) / len(prices[1:])
-    avg_loss = sum(max(0, prices[i-1] - prices[i]) for i in range(1, len(prices))) / len(prices[1:])
-    rsi = 100 - (100 / (1 + (avg_gain / avg_loss))) if avg_loss else 100
+    # RSI (14 дней)
+    gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices[-14:]))]
+    losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices[-14:]))]
+    avg_gain = sum(gains) / 14 if gains else 0
+    avg_loss = sum(losses) / 14 if losses else 0
+    rs = avg_gain / avg_loss if avg_loss else float('inf')
+    rsi = 100 - (100 / (1 + rs)) if rs != float('inf') else 100
 
-    # MACD
-    ema_fast = sum(prices[-6:]) / 6
-    ema_slow = sum(prices[-13:-7]) / 6
-    macd = ema_fast - ema_slow
-    signal = sum(prices[-4:]) / 4
+    # MACD (EMA 12, 26, Signal 9)
+    ema_12 = sum(prices[-12:]) / 12
+    ema_26 = sum(prices[-26:]) / 26 if len(prices) >= 26 else ema_12
+    macd = ema_12 - ema_26
+    signal = sum(prices[-9:]) / 9 if len(prices) >= 9 else macd
     histogram = macd - signal
 
-    # Bollinger Bands
+    # Bollinger Bands (20 дней)
     sma = sum(prices[-20:]) / 20
     std = (sum((p - sma) ** 2 for p in prices[-20:]) / 20) ** 0.5
     upper_band = sma + 2 * std
     lower_band = sma - 2 * std
 
     return rsi, macd, signal, upper_band, lower_band
+
+async def fetch_figi_with_retry(client: AsyncClient, ticker: str, max_retries: int = 3) -> Optional[str]:
+    for attempt in range(max_retries):
+        try:
+            cleaned_ticker = ticker.replace(".ME", "")
+            instrument = await client.instruments.share_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
+                class_code="TQBR",
+                id=cleaned_ticker
+            )
+            return instrument.instrument.figi
+        except InvestError as e:
+            if "RESOURCE_EXHAUSTED" in str(e):
+                reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
+                logger.warning(f"Попытка {attempt + 1}/{max_retries}: Лимит запросов превышен, ожидание {reset_time} секунд...")
+                await asyncio.sleep(reset_time)
+            else:
+                logger.error(f"Попытка {attempt + 1}/{max_retries}: Не удалось получить FIGI для {ticker}: {e}")
+                break
+        except Exception as e:
+            logger.error(f"Попытка {attempt + 1}/{max_retries}: Неожиданная ошибка для {ticker}: {e}")
+            break
+    return None
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -200,37 +227,21 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
             response = "📈 <b>Все доступные акции:</b>\n\n"
             for stock in stocks:
                 if not stock.figi:
-                    try:
-                        cleaned_ticker = stock.ticker.replace(".ME", "")
-                        instrument = await client.instruments.share_by(
-                            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                            class_code="TQBR",
-                            id=cleaned_ticker
-                        )
-                        stock.figi = instrument.instrument.figi
+                    figi = await fetch_figi_with_retry(client, stock.ticker)
+                    if figi:
+                        stock.figi = figi
                         stock.figi_status = "SUCCESS"
                         session.add(stock)
                         await session.commit()
-                    except InvestError as e:
-                        if "RESOURCE_EXHAUSTED" in str(e):
-                            reset_time = int(e.metadata.ratelimit_reset) if e.metadata.ratelimit_reset else 60
-                            logger.warning(f"Лимит запросов превышен, ожидание {reset_time} секунд...")
-                            await asyncio.sleep(reset_time)
-                            instrument = await client.instruments.share_by(
-                                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-                                class_code="TQBR",
-                                id=cleaned_ticker
-                            )
-                            stock.figi = instrument.instrument.figi
-                            stock.figi_status = "SUCCESS"
-                            session.add(stock)
-                            await session.commit()
-                        else:
-                            logger.warning(f"Не удалось получить FIGI для {stock.ticker}: {e}")
-                            stock.figi_status = "FAILED"
-                            session.add(stock)
-                            await session.commit()
-                            continue
+                    else:
+                        stock.figi_status = "FAILED"
+                        session.add(stock)
+                        await session.commit()
+                        logger.warning(f"Пропущена акция {stock.ticker} из-за невозможности получить FIGI")
+                        continue
+
+                # Ограничение на количество запросов
+                await asyncio.sleep(0.5)  # Задержка 0.5 секунды между запросами
 
                 status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
                 price = stock.last_price if stock.last_price is not None else "N/A"
@@ -238,7 +249,7 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
                 response += f"💰 Цена: {price} RUB\n"
                 response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
                 response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
-        
+
         response += "⬅️ Вернуться в меню акций."
         await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
@@ -404,6 +415,7 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
                 if not stock.figi:
                     figi = await update_figi(client, stock, session)
                     if not figi:
+                        logger.warning(f"Пропущена акция {stock.ticker} из-за отсутствия FIGI")
                         continue
 
                 end_date = datetime.utcnow()
@@ -420,21 +432,28 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
                     continue
 
                 if not candles.candles or len(candles.candles) < 20:
-                    logger.warning(f"Недостаточно данных для {stock.ticker}")
+                    logger.warning(f"Недостаточно данных для {stock.ticker}: {len(candles.candles)} свечей")
                     continue
 
                 prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
                 rsi, macd, signal, upper_band, lower_band = await calculate_indicators(prices)
 
                 if rsi is None:
+                    logger.warning(f"Не удалось рассчитать индикаторы для {stock.ticker}")
                     continue
 
                 current_price = prices[-1]
+                logger.info(f"Индикаторы для {stock.ticker}: RSI={rsi:.2f}, MACD={macd:.2f}, Signal={signal:.2f}, "
+                           f"Upper Band={upper_band:.2f}, Lower Band={lower_band:.2f}, Current Price={current_price:.2f}")
+
                 signal_text = ""
                 if rsi < 30 and macd > signal and current_price < lower_band:
                     signal_text = "📈 Сигнал на покупку: RSI < 30, MACD > Signal, цена ниже нижней Bollinger Band"
                 elif rsi > 70 and current_price > upper_band:
                     signal_text = "📉 Сигнал на продажу: RSI > 70, цена выше верхней Bollinger Band"
+                else:
+                    logger.info(f"Сигналы для {stock.ticker} не сгенерированы: RSI={rsi:.2f}, "
+                               f"MACD-Signal={macd-signal:.2f}, Price vs Bands={current_price:.2f} ({lower_band:.2f}, {upper_band:.2f})")
 
                 if signal_text:
                     response += f"🔹 {stock.ticker} ({stock.name})\n"
