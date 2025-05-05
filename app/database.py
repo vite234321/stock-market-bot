@@ -29,10 +29,7 @@ async_session = None
 def create_async_engine():
     """Создание асинхронного движка SQLAlchemy."""
     try:
-        return create_async_engine(
-            DATABASE_URL,
-            pool_pre_ping=True  # Проверяем соединения перед использованием
-        )
+        return create_async_engine(DATABASE_URL)
     except Exception as e:
         logger.error(f"Ошибка при создании движка базы данных: {e}")
         raise
