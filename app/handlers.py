@@ -157,13 +157,19 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
 
         if not stocks:
             await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
+            await callback_query.answer()
             return
 
         response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
             price = stock.last_price if stock.last_price is not None else "N/A"
-            response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
-        response += "\n⬅️ Вернуться в меню акций."
+            status_icon = "✅" if stock.figi_status == "SUCCESS" else "⚠️" if stock.figi_status == "PENDING" else "❌"
+            response += f"{status_icon} {stock.ticker} - {stock.name}\n"
+            response += f"💰 Цена: {price} RUB\n"
+            response += f"📅 Обновлено: {stock.updated_at.strftime('%Y-%m-%d %H:%M:%S') if stock.updated_at else 'N/A'}\n"
+            response += f"🔗 Статус FIGI: {stock.figi_status}\n\n"
+        
+        response += "⬅️ Вернуться в меню акций."
         await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций: {e}")
