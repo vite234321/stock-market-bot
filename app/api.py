@@ -98,13 +98,14 @@ async def check_database_health():
                 session.add_all(test_stocks)
                 await session.commit()
                 logger.info("Тестовые акции добавлены в базу.")
-
     except DBAPIError as e:
         logger.error(f"Ошибка подключения к базе данных: {e}")
         await notify_admin(f"❌ Ошибка базы данных при запуске: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"Неожиданная ошибка при проверке базы данных: {e}")
         await notify_admin(f"❌ Неожиданная ошибка при запуске: {str(e)}")
+        raise
 
 async def update_stocks():
     """Обновление списка акций через Tinkoff API."""
@@ -190,10 +191,9 @@ async def on_startup():
     logger.info("Запуск приложения...")
     try:
         # Инициализация базы данных
+        logger.info("Вызов init_db...")
         await init_db()
-        logger.info("База данных инициализирована.")
-
-        # Проверка и регистрация middleware
+        logger.info("init_db завершён, проверка async_session...")
         logger.info(f"async_session: {async_session}")
         if async_session is None:
             logger.error("async_session не инициализирован, middleware не зарегистрирован")
