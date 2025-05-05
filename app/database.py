@@ -70,6 +70,7 @@ async def init_db():
                 logger.info("Соединение с базой данных успешно установлено")
                 await conn.run_sync(Base.metadata.create_all)
                 logger.info("Таблицы успешно созданы или уже существуют")
+            global async_session  # Явное объявление для изменения глобальной переменной
             async_session = async_sessionmaker(
                 engine,
                 class_=AsyncSession,
