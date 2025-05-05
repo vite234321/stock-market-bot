@@ -5,7 +5,7 @@ from aiogram.enums import ParseMode
 import aiogram
 from app.handlers import router
 from app.middlewares import DbSessionMiddleware
-from app.database import init_db, get_session, dispose_engine
+from app.database import init_db, get_session, dispose_engine, async_session
 from app.trading import TradingBot
 from app.models import User, Stock, FigiStatus
 from sqlalchemy import select
@@ -50,7 +50,7 @@ bot = Bot(
 dp = Dispatcher()
 dp.include_router(router)
 trading_bot = TradingBot(bot)
-dp.update.middleware(DbSessionMiddleware(async_sessionmaker, trading_bot))
+dp.update.middleware(DbSessionMiddleware(async_session, trading_bot))
 
 dp.startup_timeout = 120
 dp.shutdown_timeout = 120
