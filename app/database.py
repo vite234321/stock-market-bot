@@ -33,24 +33,27 @@ if not re.match(r'^postgresql\+asyncpg://', DATABASE_URL):
 logger.info("Строка подключения к базе данных: %s", DATABASE_URL)
 
 engine = None
-async_session = None
 
 def create_engine_wrapper():
     """Создание асинхронного движка SQLAlchemy."""
     try:
         logger.info("Создание асинхронного движка SQLAlchemy...")
-        engine = create_async_engine(DATABASE_URL, echo=True, connect_args={"timeout": 30})
-        logger.info("Движок SQLAlchemy успешно создан")
+        engine = create_async_engine(
+            DATABASE_URL,
+            echo=True,
+            connect_args={"timeout": 30, "statement_cache_size": 0}  # Отключение кэша подготовленных выражений
+        )
+        logger.info("Движок SQLAlchemy успешно создан: %s", engine)
         return engine
     except Exception as e:
         logger.error(f"Ошибка при создании движка базы данных: {e}")
         raise
 
 async def init_db():
-    """Инициализация базы данных и создание таблиц с повторными попытками."""
-    global engine, async_session
+    """Инициализация базы данных и создание таблиц с повторными попытками. Возвращает async_session."""
+    global engine
     logger.info("Начало инициализации базы данных")
-    for attempt in range(1, 6):  # Уменьшено до 5 попыток для оптимизации
+    for attempt in range(1, 6):  # 5 попыток
         try:
             logger.info("Попытка %d: подключение к базе данных", attempt)
             engine = create_engine_wrapper()
@@ -66,7 +69,7 @@ async def init_db():
             )
             logger.info("async_session инициализирован: %s", async_session)
             logger.info("База данных успешно инициализирована")
-            return
+            return async_session  # Возвращаем async_session
         except OperationalError as e:
             logger.error(f"Ошибка подключения к базе данных на попытке %d: {e}", attempt)
             if attempt == 5:
@@ -78,8 +81,8 @@ async def init_db():
             if attempt == 5:
                 logger.error("Не удалось инициализировать базу данных после 5 попыток")
                 raise
-            await asyncio.sleep(5)
         finally:
+            # Закрываем движок только в случае неудачи
             if engine and attempt < 5:
                 await engine.dispose()
                 logger.info("Движок базы данных закрыт после неудачной попытки")
@@ -99,9 +102,8 @@ async def dispose_engine():
             engine = None
 
 @asynccontextmanager
-async def get_session():
+async def get_session(async_session):
     """Контекстный менеджер для получения сессии базы данных."""
-    global async_session
     if async_session is None:
         logger.error("Сессия базы данных не инициализирована")
         raise RuntimeError("Сессия базы данных не инициализирована")
