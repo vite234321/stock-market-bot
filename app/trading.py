@@ -633,7 +633,7 @@ class TradingBot:
                             logger.debug(f"Невозможно рассчитать индикаторы для {ticker}")
                             continue
 
-                        buy_signal = rsi < 35 and histogram > 0 and current_price < lower_band
+                        buy_signal = rsi < 30 and histogram > 0 and current_price < lower_band
                         if buy_signal:
                             logger.info(f"Сигнал на покупку {ticker}: RSI={rsi:.2f}, MACD Histogram={histogram:.2f}, Bollinger Lower={lower_band:.2f}")
 
