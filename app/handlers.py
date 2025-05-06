@@ -242,6 +242,10 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список всех акций")
     try:
+        # Проверка активности сессии
+        await session.execute(select(1))
+        logger.info(f"Сессия активна для пользователя {user_id}")
+
         result = await session.execute(select(Stock))
         stocks = result.scalars().all()
 
@@ -263,12 +267,15 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
         response += "\n⬅️ Вернуться в меню акций."
         await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
-        logger.error(f"Ошибка при получении всех акций: {e}")
+        logger.error(f"Ошибка при получении всех акций для пользователя {user_id}: {str(e)}", exc_info=True)
         await callback_query.message.edit_text(
-            "Произошла ошибка при получении списка акций.",
+            f"Произошла ошибка при получении списка акций: {html.escape(str(e))}",
             parse_mode="HTML",
             reply_markup=get_stocks_menu()
         )
+    finally:
+        await session.close()
+        logger.info(f"Сессия закрыта для пользователя {user_id}")
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "check_price")
