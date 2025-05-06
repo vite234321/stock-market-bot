@@ -19,7 +19,7 @@ if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 logger.info(f"Используемый DATABASE_URL: {DATABASE_URL[:50]}... (обрезан для логов)")
 
-# Создаём асинхронный движок с отключённым кэшем подготовленных запросов
+# Создаём асинхронный движок без специфичных настроек для pgbouncer
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
@@ -27,12 +27,6 @@ engine = create_async_engine(
     max_overflow=3,        # Уменьшаем количество дополнительных соединений
     pool_timeout=30,       # Таймаут ожидания соединения
     pool_pre_ping=True,    # Проверяем соединения перед использованием
-    connect_args={
-        "statement_cache_size": 0,  # Отключаем кэш подготовленных запросов
-        "server_settings": {
-            "application_name": "trading-bot",  # Имя приложения для отслеживания в PgBouncer
-        }
-    }
 )
 
 async_session = async_sessionmaker(
@@ -48,7 +42,7 @@ async def init_db():
             async with engine.begin() as conn:
                 # Проверяем подключение и логируем версию PostgreSQL
                 try:
-                    version = await conn.scalar(text("SELECT pg_catalog.version()"))
+                    version = await conn.scalar(text("SHOW server_version"))
                     logger.info(f"Успешное подключение к базе данных. Версия PostgreSQL: {version}")
                 except Exception as e:
                     logger.error(f"Ошибка при проверке версии PostgreSQL: {str(e)}")
