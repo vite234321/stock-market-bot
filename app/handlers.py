@@ -196,6 +196,7 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список своих акций")
     try:
+        # Получаем тикеры, на которые подписан пользователь
         result = await session.execute(
             select(Subscription.ticker).where(Subscription.user_id == user_id)
         )
@@ -209,6 +210,7 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             )
             return
 
+        # Получаем информацию об акциях
         result = await session.execute(
             select(Stock).where(Stock.ticker.in_(subscribed_tickers))
         )
@@ -222,6 +224,7 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             )
             return
 
+        # Формируем ответ
         response = "📋 <b>Ваши акции:</b>\n\n"
         for stock in stocks:
             price = stock.last_price if stock.last_price is not None else "N/A"
@@ -316,6 +319,74 @@ async def prompt_check_price(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет проверить цену акции")
     await callback_query.message.edit_text("🔍 Введите тикер акции (например, SBER.ME):", reply_markup=None)
     await callback_query.answer()
+
+@router.message(lambda message: message.text.endswith(".ME"))
+async def check_price_handler(message: Message, session: AsyncSession):
+    user_id = message.from_user.id
+    ticker = message.text.strip()
+    logger.info(f"Пользователь {user_id} запросил цену акции {ticker}")
+
+    try:
+        # Проверяем наличие акции в базе
+        stock_result = await session.execute(
+            select(Stock).where(Stock.ticker == ticker)
+        )
+        stock = stock_result.scalars().first()
+        if not stock:
+            await message.answer(f"Акция {ticker} не найдена в базе.", reply_markup=get_stocks_menu())
+            return
+
+        # Проверяем наличие пользователя и токена
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = user_result.scalars().first()
+
+        if not user or not user.tinkoff_token:
+            response = (
+                f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                f"💰 Последняя известная цена: {stock.last_price if stock.last_price is not None else 'N/A'} RUB\n\n"
+                "🔑 Для получения актуальной цены установите токен T-Invest API в меню настроек."
+            )
+            await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            return
+
+        # Если токен есть, запрашиваем актуальную цену через API
+        async with AsyncClient(user.tinkoff_token) as client:
+            figi = stock.figi
+            if not figi:
+                logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
+                figi = await update_figi(client, stock, session)
+                if not figi:
+                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.", reply_markup=get_stocks_menu())
+                    return
+
+            try:
+                last_price = (await client.market_data.get_last_prices(figi=[figi])).last_prices[0].price
+                price_value = last_price.units + last_price.nano / 1e9
+
+                # Обновляем цену в базе
+                stock.last_price = price_value
+                session.add(stock)
+                await session.commit()
+                logger.info(f"Цена для {ticker} обновлена: {price_value} RUB")
+
+                response = (
+                    f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                    f"💰 Актуальная цена: {price_value:.2f} RUB"
+                )
+                await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            except InvestError as e:
+                logger.error(f"Ошибка Tinkoff API при получении цены для {ticker}: {e}")
+                response = (
+                    f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                    f"💰 Последняя известная цена: {stock.last_price if stock.last_price is not None else 'N/A'} RUB\n\n"
+                    f"❌ Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже."
+                )
+                await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+    except Exception as e:
+        logger.error(f"Ошибка при получении цены для {ticker}: {e}")
+        await message.answer("❌ Ошибка при получении цены.", reply_markup=get_stocks_menu())
 
 @router.callback_query(lambda c: c.data == "price_chart")
 async def prompt_price_chart(callback_query: CallbackQuery):
