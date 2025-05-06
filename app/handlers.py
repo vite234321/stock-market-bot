@@ -1,6 +1,8 @@
 from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 from app.models import Stock, Subscription, Signal, User, TradeHistory
@@ -20,6 +22,13 @@ logger = logging.getLogger(__name__)
 logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
 
 router = Router()
+
+# Определяем состояния для FSM
+class CheckPriceState(StatesGroup):
+    waiting_for_ticker = State()
+
+class PriceChartState(StatesGroup):
+    waiting_for_ticker = State()
 
 def get_main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -315,13 +324,14 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "check_price")
-async def prompt_check_price(callback_query: CallbackQuery):
+async def prompt_check_price(callback_query: CallbackQuery, state: FSMContext):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет проверить цену акции")
     await callback_query.message.edit_text("🔍 Введите тикер акции (например, SBER.ME):", reply_markup=None)
+    await state.set_state(CheckPriceState.waiting_for_ticker)
     await callback_query.answer()
 
-@router.message(lambda message: message.text.endswith(".ME"))
-async def check_price_handler(message: Message, session: AsyncSession):
+@router.message(CheckPriceState.waiting_for_ticker)
+async def check_price_handler(message: Message, session: AsyncSession, state: FSMContext):
     user_id = message.from_user.id
     ticker = message.text.strip()
     logger.info(f"Пользователь {user_id} запросил цену акции {ticker}")
@@ -334,6 +344,7 @@ async def check_price_handler(message: Message, session: AsyncSession):
         stock = stock_result.scalars().first()
         if not stock:
             await message.answer(f"Акция {ticker} не найдена в базе.", reply_markup=get_stocks_menu())
+            await state.clear()
             return
 
         # Проверяем наличие пользователя и токена
@@ -349,6 +360,7 @@ async def check_price_handler(message: Message, session: AsyncSession):
                 "🔑 Для получения актуальной цены установите токен T-Invest API в меню настроек."
             )
             await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            await state.clear()
             return
 
         # Если токен есть, запрашиваем актуальную цену через API
@@ -359,6 +371,7 @@ async def check_price_handler(message: Message, session: AsyncSession):
                 figi = await update_figi(client, stock, session)
                 if not figi:
                     await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.", reply_markup=get_stocks_menu())
+                    await state.clear()
                     return
 
             try:
@@ -394,15 +407,18 @@ async def check_price_handler(message: Message, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при получении цены для {ticker}: {e}")
         await message.answer("❌ Ошибка при получении цены.", reply_markup=get_stocks_menu())
+    finally:
+        await state.clear()
 
 @router.callback_query(lambda c: c.data == "price_chart")
-async def prompt_price_chart(callback_query: CallbackQuery):
+async def prompt_price_chart(callback_query: CallbackQuery, state: FSMContext):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет увидеть график цены акции")
     await callback_query.message.edit_text("📉 Введите тикер акции для построения графика (например, SBER.ME):", reply_markup=None)
+    await state.set_state(PriceChartState.waiting_for_ticker)
     await callback_query.answer()
 
-@router.message(lambda message: message.text.endswith(".ME"))
-async def generate_price_chart(message: Message, session: AsyncSession):
+@router.message(PriceChartState.waiting_for_ticker)
+async def generate_price_chart(message: Message, session: AsyncSession, state: FSMContext):
     user_id = message.from_user.id
     ticker = message.text.strip()
     logger.info(f"Пользователь {user_id} запросил график цены для {ticker}")
@@ -414,6 +430,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
         user = user_result.scalars().first()
         if not user or not user.tinkoff_token:
             await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.", reply_markup=get_stocks_menu())
+            await state.clear()
             return
 
         stock_result = await session.execute(
@@ -422,6 +439,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
         stock = stock_result.scalars().first()
         if not stock:
             await message.answer(f"Акция {ticker} не найдена в базе.", reply_markup=get_stocks_menu())
+            await state.clear()
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
@@ -431,6 +449,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                 figi = await update_figi(client, stock, session)
                 if not figi:
                     await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.", reply_markup=get_stocks_menu())
+                    await state.clear()
                     return
 
             end_date = datetime.utcnow()
@@ -449,10 +468,12 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                     parse_mode="HTML",
                     reply_markup=get_stocks_menu()
                 )
+                await state.clear()
                 return
 
             if not candles.candles or len(candles.candles) < 5:
                 await message.answer(f"Недостаточно данных для построения графика {ticker}.", reply_markup=get_stocks_menu())
+                await state.clear()
                 return
 
             dates = [candle.time for candle in candles.candles]
@@ -483,6 +504,8 @@ async def generate_price_chart(message: Message, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при построении графика для {ticker}: {e}")
         await message.answer("❌ Ошибка при построении графика.", reply_markup=get_stocks_menu())
+    finally:
+        await state.clear()
 
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
