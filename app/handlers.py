@@ -32,7 +32,7 @@ def get_main_menu():
 def get_stocks_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои акции", callback_data="list_stocks"),
-         InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks")],
+         InlineKeyboardButton(text="📈 Все акции", callback_data="list_all_stocks_0")],
         [InlineKeyboardButton(text="🔍 Проверить цену", callback_data="check_price"),
          InlineKeyboardButton(text="📉 График цены", callback_data="price_chart")],
         [InlineKeyboardButton(text="🔔 Подписаться", callback_data="subscribe"),
@@ -237,19 +237,26 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
         )
     await callback_query.answer()
 
-@router.callback_query(lambda c: c.data == "list_all_stocks")
+@router.callback_query(lambda c: c.data.startswith("list_all_stocks_"))
 async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
     user_id = callback_query.from_user.id
     logger.info(f"Пользователь {user_id} запросил список всех акций")
+    
     try:
+        # Извлекаем номер страницы из callback_data
+        page = int(callback_query.data.split("_")[-1])
+        items_per_page = 20  # Количество акций на одной странице
+
         # Проверка активности сессии
         await session.execute(select(1))
         logger.info(f"Сессия активна для пользователя {user_id}")
 
-        result = await session.execute(select(Stock))
-        stocks = result.scalars().all()
+        # Получаем общее количество акций
+        result = await session.execute(select(func.count()).select_from(Stock))
+        total_stocks = result.scalar()
+        total_pages = (total_stocks + items_per_page - 1) // items_per_page  # Округление вверх
 
-        if not stocks:
+        if total_stocks == 0:
             await callback_query.message.edit_text(
                 "В базе нет доступных акций. Попробуйте позже.",
                 parse_mode="HTML",
@@ -258,14 +265,40 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
             await callback_query.answer()
             return
 
-        response = "📈 <b>Все доступные акции:</b>\n\n"
+        # Проверяем, что страница в допустимом диапазоне
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+
+        # Получаем акции для текущей страницы
+        result = await session.execute(
+            select(Stock).offset(page * items_per_page).limit(items_per_page)
+        )
+        stocks = result.scalars().all()
+
+        # Формируем текст сообщения
+        response = f"📈 <b>Все доступные акции (Страница {page + 1} из {total_pages}):</b>\n\n"
         for stock in stocks:
             status = stock.figi_status if stock.figi_status else "UNKNOWN"
             status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
             price = stock.last_price if stock.last_price is not None else "N/A"
             response += f"{status_icon} {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
-        response += "\n⬅️ Вернуться в меню акций."
-        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+
+        # Создаем клавиатуру с кнопками навигации
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"list_all_stocks_{page-1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"list_all_stocks_{page+1}"))
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            nav_buttons,
+            [InlineKeyboardButton(text="⬅️ Вернуться в меню акций", callback_data="stocks_menu")]
+        ])
+
+        # Отправляем или редактируем сообщение
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций для пользователя {user_id}: {str(e)}", exc_info=True)
         await callback_query.message.edit_text(
