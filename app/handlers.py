@@ -12,22 +12,12 @@ import asyncio
 import html
 from typing import Optional
 import aiohttp
-
-# Проверка установки tinkoff-invest
-try:
-    import tinkoff
-    from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    # Убедимся, что логи не отправляются в Telegram
-    logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
-    logger.info(f"Модуль tinkoff-invest успешно импортирован в handlers.py, версия: {tinkoff.invest.__version__}")
-except ImportError as e:
-    logging.basicConfig(level=logging.ERROR)
-    logger = logging.getLogger(__name__)
-    logger.error("Ошибка импорта tinkoff.invest в handlers.py. Убедитесь, что tinkoff-invest установлен в requirements.txt.")
-    raise ImportError("Ошибка импорта tinkoff.invest. Убедитесь, что tinkoff-invest установлен в requirements.txt.") from e
+from tinkoff.invest import AsyncClient, CandleInterval, InstrumentIdType, OrderDirection
 from tinkoff.invest.exceptions import InvestError
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
 
 router = Router()
 
@@ -174,31 +164,31 @@ async def cmd_start(message: Message):
 @router.callback_query(lambda c: c.data == "stocks_menu")
 async def stocks_menu(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} открыл меню акций")
-    await callback_query.message.answer("📈 <b>Меню акций:</b>", parse_mode="HTML", reply_markup=get_stocks_menu())
+    await callback_query.message.edit_text("📈 <b>Меню акций:</b>", parse_mode="HTML", reply_markup=get_stocks_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "trading_menu")
 async def trading_menu(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} открыл меню торговли")
-    await callback_query.message.answer("🤖 <b>Меню торговли:</b>", parse_mode="HTML", reply_markup=get_trading_menu())
+    await callback_query.message.edit_text("🤖 <b>Меню торговли:</b>", parse_mode="HTML", reply_markup=get_trading_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "settings_menu")
 async def settings_menu(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} открыл меню настроек")
-    await callback_query.message.answer("⚙️ <b>Меню настроек:</b>", parse_mode="HTML", reply_markup=get_settings_menu())
+    await callback_query.message.edit_text("⚙️ <b>Меню настроек:</b>", parse_mode="HTML", reply_markup=get_settings_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_main")
 async def back_to_main(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} вернулся в главное меню")
-    await callback_query.message.answer("🌟 Выберите раздел:", reply_markup=get_main_menu())
+    await callback_query.message.edit_text("🌟 Выберите раздел:", parse_mode="HTML", reply_markup=get_main_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "back_to_trading")
 async def back_to_trading(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} вернулся в меню торговли")
-    await callback_query.message.answer("🤖 <b>Меню торговли:</b>", parse_mode="HTML", reply_markup=get_trading_menu())
+    await callback_query.message.edit_text("🤖 <b>Меню торговли:</b>", parse_mode="HTML", reply_markup=get_trading_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "list_stocks")
@@ -212,7 +202,11 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
         subscribed_tickers = result.scalars().all()
 
         if not subscribed_tickers:
-            await callback_query.message.answer("Вы не подписаны ни на одну акцию. Нажмите 'Подписаться' в меню акций.")
+            await callback_query.message.edit_text(
+                "Вы не подписаны ни на одну акцию. Нажмите 'Подписаться' в меню акций.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             return
 
         result = await session.execute(
@@ -221,7 +215,11 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
         stocks = result.scalars().all()
 
         if not stocks:
-            await callback_query.message.answer("Акции не найдены. Попробуйте позже.")
+            await callback_query.message.edit_text(
+                "Акции не найдены. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             return
 
         response = "📋 <b>Ваши акции:</b>\n\n"
@@ -229,10 +227,14 @@ async def list_stocks(callback_query: CallbackQuery, session: AsyncSession):
             price = stock.last_price if stock.last_price is not None else "N/A"
             response += f"🔹 {stock.ticker}: {stock.name} ({price} RUB)\n"
         response += "\n⬅️ Вернуться в меню акций."
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении акций: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении акций.")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при получении акций.",
+            parse_mode="HTML",
+            reply_markup=get_stocks_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "list_all_stocks")
@@ -244,34 +246,41 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
         stocks = result.scalars().all()
 
         if not stocks:
-            await callback_query.message.answer("В базе нет доступных акций. Попробуйте позже.")
+            await callback_query.message.edit_text(
+                "В базе нет доступных акций. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             await callback_query.answer()
             return
 
         response = "📈 <b>Все доступные акции:</b>\n\n"
         for stock in stocks:
-            # Проверяем figi_status, если None, то отображаем как "UNKNOWN"
             status = stock.figi_status if stock.figi_status else "UNKNOWN"
             status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
             price = stock.last_price if stock.last_price is not None else "N/A"
             response += f"{status_icon} {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
         response += "\n⬅️ Вернуться в меню акций."
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении всех акций: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении списка акций.")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при получении списка акций.",
+            parse_mode="HTML",
+            reply_markup=get_stocks_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "check_price")
 async def prompt_check_price(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет проверить цену акции")
-    await callback_query.message.answer("🔍 Введите тикер акции (например, SBER.ME):")
+    await callback_query.message.edit_text("🔍 Введите тикер акции (например, SBER.ME):", reply_markup=None)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "price_chart")
 async def prompt_price_chart(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет увидеть график цены акции")
-    await callback_query.message.answer("📉 Введите тикер акции для построения графика (например, SBER.ME):")
+    await callback_query.message.edit_text("📉 Введите тикер акции для построения графика (например, SBER.ME):", reply_markup=None)
     await callback_query.answer()
 
 @router.message(lambda message: message.text.endswith(".ME"))
@@ -286,7 +295,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
         )
         user = user_result.scalars().first()
         if not user or not user.tinkoff_token:
-            await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.", reply_markup=get_stocks_menu())
             return
 
         stock_result = await session.execute(
@@ -294,7 +303,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
         )
         stock = stock_result.scalars().first()
         if not stock:
-            await message.answer(f"Акция {ticker} не найдена в базе.")
+            await message.answer(f"Акция {ticker} не найдена в базе.", reply_markup=get_stocks_menu())
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
@@ -303,7 +312,7 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                 logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
                 figi = await update_figi(client, stock, session)
                 if not figi:
-                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.")
+                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.", reply_markup=get_stocks_menu())
                     return
 
             end_date = datetime.utcnow()
@@ -317,11 +326,11 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                 )
             except InvestError as e:
                 logger.error(f"Ошибка Tinkoff API при получении свечей для {ticker}: {e}")
-                await message.answer(f"Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже.")
+                await message.answer(f"Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже.", reply_markup=get_stocks_menu())
                 return
 
             if not candles.candles or len(candles.candles) < 5:
-                await message.answer(f"Недостаточно данных для построения графика {ticker}.")
+                await message.answer(f"Недостаточно данных для построения графика {ticker}.", reply_markup=get_stocks_menu())
                 return
 
             dates = [candle.time for candle in candles.candles]
@@ -349,12 +358,12 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                     logger.info(f"Файл графика {chart_path} удалён")
     except Exception as e:
         logger.error(f"Ошибка при построении графика для {ticker}: {e}")
-        await message.answer("❌ Ошибка при построении графика.")
+        await message.answer("❌ Ошибка при построении графика.", reply_markup=get_stocks_menu())
 
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} хочет подписаться на акции")
-    await callback_query.message.answer("🔔 Введите тикер акции для подписки (например, SBER.ME):")
+    await callback_query.message.edit_text("🔔 Введите тикер акции для подписки (например, SBER.ME):", reply_markup=None)
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "signals")
@@ -368,7 +377,11 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
         subscribed_tickers = result.scalars().all()
 
         if not subscribed_tickers:
-            await callback_query.message.answer("Вы не подписаны ни на одну акцию. Нажмите 'Подписаться' в меню акций.")
+            await callback_query.message.edit_text(
+                "Вы не подписаны ни на одну акцию. Нажмите 'Подписаться' в меню акций.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             return
 
         result = await session.execute(
@@ -377,7 +390,11 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
         stocks = result.scalars().all()
 
         if not stocks:
-            await callback_query.message.answer("Акции не найдены. Попробуйте позже.")
+            await callback_query.message.edit_text(
+                "Акции не найдены. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             return
 
         user_result = await session.execute(
@@ -385,7 +402,11 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
         )
         user = user_result.scalars().first()
         if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            await callback_query.message.edit_text(
+                "🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
@@ -444,10 +465,14 @@ async def signals(callback_query: CallbackQuery, session: AsyncSession):
                 response += "🚫 Нет актуальных сигналов на текущий момент.\n\n"
 
             response += "⬅️ Вернуться в меню акций."
-            await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_stocks_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении сигналов: {e}")
-        await callback_query.message.answer("Произошла ошибка при получении сигналов. Проверьте подключение к Tinkoff API.")
+        await callback_query.message.edit_text(
+            "Произошла ошибка при получении сигналов. Проверьте подключение к Tinkoff API.",
+            parse_mode="HTML",
+            reply_markup=get_stocks_menu()
+        )
     await callback_query.answer()
 
 @router.message(lambda message: message.text.startswith('t.'))
@@ -475,7 +500,7 @@ async def save_token(message: Message, session: AsyncSession):
 @router.callback_query(lambda c: c.data == "autotrading_menu")
 async def autotrading_menu(callback_query: CallbackQuery):
     logger.info(f"Пользователь {callback_query.from_user.id} открыл меню автоторговли")
-    await callback_query.message.answer("🤖 <b>Меню автоторговли:</b>", parse_mode="HTML", reply_markup=get_autotrading_menu())
+    await callback_query.message.edit_text("🤖 <b>Меню автоторговли:</b>", parse_mode="HTML", reply_markup=get_autotrading_menu())
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "view_profile")
@@ -487,7 +512,11 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
         user = result.scalars().first()
 
         if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            await callback_query.message.edit_text(
+                "🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.",
+                parse_mode="HTML",
+                reply_markup=get_autotrading_menu()
+            )
             return
 
         result = await session.execute(
@@ -515,7 +544,11 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
         async with AsyncClient(user.tinkoff_token) as client:
             accounts = await client.users.get_accounts()
             if not accounts.accounts:
-                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
+                await callback_query.message.edit_text(
+                    "❌ Счета не найдены. Проверьте токен T-Invest API.",
+                    parse_mode="HTML",
+                    reply_markup=get_autotrading_menu()
+                )
                 return
             account_id = accounts.accounts[0].id
 
@@ -534,10 +567,14 @@ async def view_profile(callback_query: CallbackQuery, session: AsyncSession):
             f"📈 Продажи: {total_sell:.2f} RUB\n"
             f"📊 Прибыль: {profit:.2f} RUB\n"
         )
-        await callback_query.message.answer(profile_text, parse_mode="HTML", reply_markup=get_autotrading_menu())
+        await callback_query.message.edit_text(profile_text, parse_mode="HTML", reply_markup=get_autotrading_menu())
     except Exception as e:
         logger.error(f"Ошибка при просмотре профиля пользователя {user_id}: {e}")
-        await callback_query.message.answer("❌ Ошибка при просмотре профиля.")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при просмотре профиля.",
+            parse_mode="HTML",
+            reply_markup=get_autotrading_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "enable_autotrading")
@@ -548,22 +585,25 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         result = await session.execute(select(User).where(User.user_id == user_id))
         user = result.scalars().first()
         if not user:
-            await callback_query.message.answer(
+            await callback_query.message.edit_text(
                 "❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.",
+                parse_mode="HTML",
                 reply_markup=get_autotrading_menu()
             )
             return
 
         if not user.tinkoff_token:
-            await callback_query.message.answer(
+            await callback_query.message.edit_text(
                 "❌ Токен T-Invest API не установлен. Установите его в меню настроек.",
+                parse_mode="HTML",
                 reply_markup=get_autotrading_menu()
             )
             return
 
         if user.autotrading_enabled:
-            await callback_query.message.answer(
+            await callback_query.message.edit_text(
                 "⚠️ Автоторговля уже включена!",
+                parse_mode="HTML",
                 reply_markup=get_autotrading_menu()
             )
             return
@@ -571,8 +611,9 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         stocks_result = await session.execute(select(Stock))
         stocks = stocks_result.scalars().all()
         if not stocks:
-            await callback_query.message.answer(
+            await callback_query.message.edit_text(
                 "❌ Нет доступных акций для торговли. Обратитесь к администратору или добавьте тикеры.",
+                parse_mode="HTML",
                 reply_markup=get_autotrading_menu()
             )
             return
@@ -584,7 +625,6 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
         task = asyncio.create_task(trading_bot.stream_and_trade(user_id))
         trading_bot.stream_tasks[user_id] = task
 
-        # Игнорируем результаты бэктеста и пробуем торговать
         async with AsyncClient(user.tinkoff_token) as client:
             account_id = (await client.users.get_accounts()).accounts[0].id
             for stock in stocks:
@@ -631,10 +671,11 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
                     session.add(trade)
                     await session.commit()
                     await callback_query.message.answer(f"✅ Куплена акция {stock.ticker} по цене {last_price_value:.2f} RUB")
-                    break  # Покупаем только одну акцию для теста
+                    break
 
-        await callback_query.message.answer(
+        await callback_query.message.edit_text(
             "▶️ Автоторговля включена!",
+            parse_mode="HTML",
             reply_markup=get_autotrading_menu()
         )
     except Exception as e:
@@ -650,8 +691,9 @@ async def enable_autotrading(callback_query: CallbackQuery, session: AsyncSessio
             error_message += "Недостаточно данных для обучения модели."
         else:
             error_message += f"Неизвестная ошибка: {html.escape(str(e))}."
-        await callback_query.message.answer(
+        await callback_query.message.edit_text(
             error_message,
+            parse_mode="HTML",
             reply_markup=get_autotrading_menu()
         )
     await callback_query.answer()
@@ -665,7 +707,11 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
         user = result.scalars().first()
 
         if not user:
-            await callback_query.message.answer("❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.")
+            await callback_query.message.edit_text(
+                "❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.",
+                parse_mode="HTML",
+                reply_markup=get_autotrading_menu()
+            )
             return
 
         user.autotrading_enabled = False
@@ -673,10 +719,18 @@ async def disable_autotrading(callback_query: CallbackQuery, session: AsyncSessi
 
         trading_bot.stop_streaming(user_id)
 
-        await callback_query.message.answer("⏹️ Автоторговля отключена!", reply_markup=get_autotrading_menu())
+        await callback_query.message.edit_text(
+            "⏹️ Автоторговля отключена!",
+            parse_mode="HTML",
+            reply_markup=get_autotrading_menu()
+        )
     except Exception as e:
         logger.error(f"Ошибка при отключении автоторговли для пользователя {user_id}: {e}")
-        await callback_query.message.answer("❌ Ошибка при отключении автоторговли.")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при отключении автоторговли.",
+            parse_mode="HTML",
+            reply_markup=get_autotrading_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "trade_history")
@@ -690,7 +744,11 @@ async def trade_history(callback_query: CallbackQuery, session: AsyncSession):
         trades = result.scalars().all()
 
         if not trades:
-            await callback_query.message.answer("📜 У вас пока нет истории торгов.")
+            await callback_query.message.edit_text(
+                "📜 У вас пока нет истории торгов.",
+                parse_mode="HTML",
+                reply_markup=get_trading_menu()
+            )
             return
 
         response = "📜 <b>История торгов (последние 10):</b>\n\n"
@@ -698,10 +756,14 @@ async def trade_history(callback_query: CallbackQuery, session: AsyncSession):
             action = "Покупка" if trade.action == "buy" else "Продажа"
             response += f"🕒 {trade.created_at.strftime('%Y-%m-%d %H:%M:%S')} | {action} | {trade.ticker} | {trade.quantity} акций | {trade.price} RUB | Итог: {trade.total} RUB\n"
         response += "\n⬅️ Вернуться в меню торговли."
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_trading_menu())
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_trading_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении истории торгов: {e}")
-        await callback_query.message.answer("❌ Ошибка при получении истории торгов.")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при получении истории торгов.",
+            parse_mode="HTML",
+            reply_markup=get_trading_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "balance")
@@ -714,26 +776,39 @@ async def balance(callback_query: CallbackQuery, session: AsyncSession):
         )
         user = user_result.scalars().first()
         if not user or not user.tinkoff_token:
-            await callback_query.message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.")
+            await callback_query.message.edit_text(
+                "🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.",
+                parse_mode="HTML",
+                reply_markup=get_trading_menu()
+            )
             return
 
         async with AsyncClient(user.tinkoff_token) as client:
             accounts = await client.users.get_accounts()
             if not accounts.accounts:
-                await callback_query.message.answer("❌ Счета не найдены. Проверьте токен T-Invest API.")
+                await callback_query.message.edit_text(
+                    "❌ Счета не найдены. Проверьте токен T-Invest API.",
+                    parse_mode="HTML",
+                    reply_markup=get_trading_menu()
+                )
                 return
             account_id = accounts.accounts[0].id
 
             portfolio = await client.operations.get_portfolio(account_id=account_id)
             total_balance = portfolio.total_amount_currencies.units + portfolio.total_amount_currencies.nano / 1e9
 
-        await callback_query.message.answer(
+        await callback_query.message.edit_text(
             f"💰 Ваш текущий баланс: {total_balance:.2f} RUB",
+            parse_mode="HTML",
             reply_markup=get_trading_menu()
         )
     except Exception as e:
         logger.error(f"Ошибка при получении баланса для пользователя {user_id}: {e}")
-        await callback_query.message.answer("❌ Ошибка при получении баланса.")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при получении баланса.",
+            parse_mode="HTML",
+            reply_markup=get_trading_menu()
+        )
     await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "daily_stats")
@@ -753,8 +828,12 @@ async def daily_stats(callback_query: CallbackQuery, session: AsyncSession):
             f"📊 Прибыль: {stats['profit']:.2f} RUB\n"
             f"\n⬅️ Вернуться в меню торговли."
         )
-        await callback_query.message.answer(response, parse_mode="HTML", reply_markup=get_trading_menu())
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=get_trading_menu())
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
-        await callback_query.message.answer("❌ Ошибка при получении статистики.")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при получении статистики.",
+            parse_mode="HTML",
+            reply_markup=get_trading_menu()
+        )
     await callback_query.answer()
