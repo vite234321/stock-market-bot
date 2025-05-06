@@ -381,9 +381,16 @@ async def check_price_handler(message: Message, session: AsyncSession):
                 response = (
                     f"🔍 Акция: {stock.ticker} ({stock.name})\n"
                     f"💰 Последняя известная цена: {stock.last_price if stock.last_price is not None else 'N/A'} RUB\n\n"
-                    f"❌ Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже."
+                    f"❌ Ошибка API Tinkoff: {html.escape(str(e))}. Проверьте токен или попробуйте позже."
                 )
                 await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            except Exception as e:
+                logger.error(f"Неизвестная ошибка при получении цены для {ticker}: {e}")
+                await message.answer(
+                    f"❌ Ошибка при получении цены для {ticker}: {html.escape(str(e))}. Попробуйте позже.",
+                    parse_mode="HTML",
+                    reply_markup=get_stocks_menu()
+                )
     except Exception as e:
         logger.error(f"Ошибка при получении цены для {ticker}: {e}")
         await message.answer("❌ Ошибка при получении цены.", reply_markup=get_stocks_menu())
@@ -437,7 +444,11 @@ async def generate_price_chart(message: Message, session: AsyncSession):
                 )
             except InvestError as e:
                 logger.error(f"Ошибка Tinkoff API при получении свечей для {ticker}: {e}")
-                await message.answer(f"Ошибка API Tinkoff: {html.escape(str(e))}. Попробуйте позже.", reply_markup=get_stocks_menu())
+                await message.answer(
+                    f"❌ Ошибка при получении данных для графика {ticker}: {html.escape(str(e))}. Проверьте токен или попробуйте позже.",
+                    parse_mode="HTML",
+                    reply_markup=get_stocks_menu()
+                )
                 return
 
             if not candles.candles or len(candles.candles) < 5:
@@ -457,12 +468,14 @@ async def generate_price_chart(message: Message, session: AsyncSession):
             plt.tight_layout()
 
             chart_path = f"chart_{user_id}_{ticker.replace('.ME', '')}.png"
-            plt.savefig(chart_path)
-            plt.close()
-
             try:
+                plt.savefig(chart_path)
+                plt.close()
                 chart_file = FSInputFile(chart_path)
                 await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении графика для {ticker}: {e}")
+                await message.answer(f"❌ Ошибка при сохранении графика {ticker}: {html.escape(str(e))}.", reply_markup=get_stocks_menu())
             finally:
                 if os.path.exists(chart_path):
                     os.remove(chart_path)
