@@ -259,10 +259,6 @@ async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
         page = int(callback_query.data.split("_")[-1])
         items_per_page = 20  # Количество акций на одной странице
 
-        # Проверка активности сессии
-        await session.execute(select(1))
-        logger.info(f"Сессия активна для пользователя {user_id}")
-
         # Получаем общее количество акций
         result = await session.execute(select(func.count()).select_from(Stock))
         total_stocks = result.scalar()
