@@ -78,7 +78,14 @@ async def update_figi_for_all_stocks():
             user = user_result.scalars().first()
             if not user:
                 logger.warning("Не найден пользователь с токеном Tinkoff API для обновления FIGI")
-                return
+                await notify_admin("⚠️ Не найден пользователь с токеном T-Invest API для обновления FIGI. Пожалуйста, установите токен в боте или добавьте тестовый токен.")
+                # Используем тестовый токен, если он задан в переменных окружения
+                test_token = os.getenv("TEST_TINKOFF_TOKEN")
+                if not test_token:
+                    logger.error("Тестовый токен T-Invest API не установлен в переменных окружения")
+                    return
+                logger.info("Используем тестовый токен T-Invest API для обновления FIGI")
+                user = User(user_id=0, tinkoff_token=test_token)  # Временный объект для использования токена
 
             async with AsyncClient(user.tinkoff_token) as client:
                 stocks_result = await session.execute(
@@ -96,7 +103,6 @@ async def update_figi_for_all_stocks():
                         original_ticker = stock.ticker
                         cleaned_ticker = original_ticker.replace('.ME', '')
                         if original_ticker != cleaned_ticker:
-                            # Проверяем, существует ли cleaned_ticker
                             existing_ticker = await session.execute(
                                 select(Stock).where(Stock.ticker == cleaned_ticker)
                             )
@@ -154,6 +160,7 @@ async def update_figi_for_all_stocks():
         except Exception as e:
             logger.error(f"Ошибка при обновлении FIGI: {e}")
             await session.rollback()
+            await notify_admin(f"❌ Ошибка при обновлении FIGI: {html.escape(str(e))}")
 
 async def start_streaming_for_users():
     logger.info("Запуск стриминга для всех пользователей")

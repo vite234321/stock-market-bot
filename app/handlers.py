@@ -413,22 +413,14 @@ async def prompt_price_chart(callback_query: CallbackQuery, state: FSMContext):
     await state.set_state(PriceChartState.waiting_for_ticker)
     await callback_query.answer()
 
-@router.message(PriceChartState.waiting_for_ticker)
-async def generate_price_chart(message: Message, session: AsyncSession, state: FSMContext):
+@router.message(CheckPriceState.waiting_for_ticker)
+async def check_price_handler(message: Message, session: AsyncSession, state: FSMContext):
     user_id = message.from_user.id
     ticker = message.text.strip()
-    logger.info(f"Пользователь {user_id} запросил график цены для {ticker}")
+    logger.info(f"Пользователь {user_id} запросил цену акции {ticker}")
 
     try:
-        user_result = await session.execute(
-            select(User).where(User.user_id == user_id)
-        )
-        user = user_result.scalars().first()
-        if not user or not user.tinkoff_token:
-            await message.answer("🔑 У вас не установлен токен T-Invest API. Установите его в меню настроек.", reply_markup=get_stocks_menu())
-            await state.clear()
-            return
-
+        # Проверяем наличие акции в базе
         stock_result = await session.execute(
             select(Stock).where(Stock.ticker == ticker)
         )
@@ -438,70 +430,171 @@ async def generate_price_chart(message: Message, session: AsyncSession, state: F
             await state.clear()
             return
 
+        # Проверяем наличие пользователя и токена
+        user_result = await session.execute(
+            select(User).where(User.user_id == user_id)
+        )
+        user = user_result.scalars().first()
+
+        if not user:
+            logger.warning(f"Пользователь {user_id} не найден в базе данных")
+            await message.answer(
+                "❌ Вы не зарегистрированы. Установите токен T-Invest API в меню настроек.",
+                reply_markup=get_stocks_menu()
+            )
+            await state.clear()
+            return
+
+        if not user.tinkoff_token:
+            logger.warning(f"Токен T-Invest API отсутствует для пользователя {user_id}")
+            response = (
+                f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                f"💰 Последняя известная цена: {stock.last_price if stock.last_price is not None else 'N/A'} RUB\n\n"
+                "⚠️ Токен T-Invest API не установлен! Пожалуйста, установите его в меню 'Настройки' → 'Установить токен', чтобы получать актуальные цены."
+            )
+            await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            await state.clear()
+            return
+
+        # Если токен есть, запрашиваем актуальную цену через API
         async with AsyncClient(user.tinkoff_token) as client:
             figi = stock.figi
             if not figi:
                 logger.warning(f"FIGI для {ticker} отсутствует в базе, пытаемся обновить...")
                 figi = await update_figi(client, stock, session)
                 if not figi:
-                    await message.answer(f"Не удалось получить FIGI для {ticker}. Попробуйте позже.", reply_markup=get_stocks_menu())
+                    logger.error(f"Не удалось обновить FIGI для {ticker}")
+                    await message.answer(
+                        f"❌ Не удалось получить FIGI для {ticker}. Попробуйте позже или проверьте тикер.",
+                        reply_markup=get_stocks_menu()
+                    )
                     await state.clear()
                     return
 
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=30)
             try:
-                candles = await client.market_data.get_candles(
-                    figi=figi,
-                    from_=start_date,
-                    to=end_date,
-                    interval=CandleInterval.CANDLE_INTERVAL_DAY
+                last_price = (await client.market_data.get_last_prices(figi=[figi])).last_prices[0].price
+                price_value = last_price.units + last_price.nano / 1e9
+
+                # Обновляем цену в базе
+                stock.last_price = price_value
+                session.add(stock)
+                await session.commit()
+                logger.info(f"Цена для {ticker} обновлена: {price_value} RUB")
+
+                response = (
+                    f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                    f"💰 Актуальная цена: {price_value:.2f} RUB"
                 )
+                await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
             except InvestError as e:
-                logger.error(f"Ошибка Tinkoff API при получении свечей для {ticker}: {e}")
+                logger.error(f"Ошибка T-Invest API при получении цены для {ticker}: {e}")
+                response = (
+                    f"🔍 Акция: {stock.ticker} ({stock.name})\n"
+                    f"💰 Последняя известная цена: {stock.last_price if stock.last_price is not None else 'N/A'} RUB\n\n"
+                    f"❌ Ошибка API Tinkoff: {html.escape(str(e))}. Проверьте токен или попробуйте позже."
+                )
+                await message.answer(response, parse_mode="HTML", reply_markup=get_stocks_menu())
+            except Exception as e:
+                logger.error(f"Неизвестная ошибка при получении цены для {ticker}: {e}")
                 await message.answer(
-                    f"❌ Ошибка при получении данных для графика {ticker}: {html.escape(str(e))}. Проверьте токен или попробуйте позже.",
+                    f"❌ Ошибка при получении цены для {ticker}: {html.escape(str(e))}. Попробуйте позже.",
                     parse_mode="HTML",
                     reply_markup=get_stocks_menu()
                 )
-                await state.clear()
-                return
-
-            if not candles.candles or len(candles.candles) < 5:
-                await message.answer(f"Недостаточно данных для построения графика {ticker}.", reply_markup=get_stocks_menu())
-                await state.clear()
-                return
-
-            dates = [candle.time for candle in candles.candles]
-            prices = [candle.close.units + candle.close.nano / 1e9 for candle in candles.candles]
-
-            plt.figure(figsize=(10, 5))
-            plt.plot(dates, prices, marker='o', linestyle='-', color='b')
-            plt.title(f"График цены {ticker} (30 дней)")
-            plt.xlabel("Дата")
-            plt.ylabel("Цена (RUB)")
-            plt.grid(True)
-            plt.xticks(rotation=45)
-            plt.tight_layout()
-
-            chart_path = f"chart_{user_id}_{ticker.replace('.ME', '')}.png"
-            try:
-                plt.savefig(chart_path)
-                plt.close()
-                chart_file = FSInputFile(chart_path)
-                await message.answer_photo(chart_file, caption=f"📉 График цены для {ticker}", reply_markup=get_stocks_menu())
-            except Exception as e:
-                logger.error(f"Ошибка при сохранении графика для {ticker}: {e}")
-                await message.answer(f"❌ Ошибка при сохранении графика {ticker}: {html.escape(str(e))}.", reply_markup=get_stocks_menu())
-            finally:
-                if os.path.exists(chart_path):
-                    os.remove(chart_path)
-                    logger.info(f"Файл графика {chart_path} удалён")
     except Exception as e:
-        logger.error(f"Ошибка при построении графика для {ticker}: {e}")
-        await message.answer("❌ Ошибка при построении графика.", reply_markup=get_stocks_menu())
+        logger.error(f"Ошибка при обработке запроса цены для {ticker}: {e}")
+        await message.answer("❌ Ошибка при получении цены. Попробуйте снова.", reply_markup=get_stocks_menu())
     finally:
         await state.clear()
+
+@router.callback_query(lambda c: c.data.startswith("list_all_stocks_"))
+async def list_all_stocks(callback_query: CallbackQuery, session: AsyncSession):
+    user_id = callback_query.from_user.id
+    logger.info(f"Пользователь {user_id} запросил список всех акций")
+    
+    try:
+        # Извлекаем номер страницы из callback_data
+        page = int(callback_query.data.split("_")[-1])
+        items_per_page = 20
+
+        # Получаем общее количество акций
+        try:
+            result = await session.execute(select(func.count()).select_from(Stock))
+            total_stocks = result.scalar()
+            logger.info(f"Общее количество акций в базе: {total_stocks}")
+        except Exception as e:
+            logger.error(f"Ошибка при получении количества акций: {str(e)}")
+            await callback_query.message.edit_text(
+                "❌ Ошибка при получении списка акций: Не удалось подключиться к базе данных.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
+            await callback_query.answer()
+            return
+
+        total_pages = (total_stocks + items_per_page - 1) // items_per_page
+
+        if total_stocks == 0:
+            await callback_query.message.edit_text(
+                "В базе нет доступных акций. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
+            await callback_query.answer()
+            return
+
+        if page < 0:
+            page = 0
+        if page >= total_pages:
+            page = total_pages - 1
+
+        # Получаем акции для текущей страницы
+        try:
+            result = await session.execute(
+                select(Stock).offset(page * items_per_page).limit(items_per_page)
+            )
+            stocks = result.scalars().all()
+            logger.info(f"Получено {len(stocks)} акций для страницы {page + 1}")
+        except Exception as e:
+            logger.error(f"Ошибка при получении акций для страницы {page + 1}: {str(e)}")
+            await callback_query.message.edit_text(
+                "❌ Ошибка при получении списка акций: Не удалось получить данные из базы.",
+                parse_mode="HTML",
+                reply_markup=get_stocks_menu()
+            )
+            await callback_query.answer()
+            return
+
+        response = f"📈 <b>Все доступные акции (Страница {page + 1} из {total_pages}):</b>\n\n"
+        for stock in stocks:
+            status = stock.figi_status if stock.figi_status else "UNKNOWN"
+            status_icon = "✅" if status == "SUCCESS" else "⚠️" if status == "PENDING" else "❌"
+            price = stock.last_price if stock.last_price is not None else "N/A"
+            response += f"{status_icon} {stock.ticker} - {stock.name} | Цена: {price} RUB\n"
+
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"list_all_stocks_{page-1}"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"list_all_stocks_{page+1}"))
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            nav_buttons,
+            [InlineKeyboardButton(text="⬅️ Вернуться в меню акций", callback_data="stocks_menu")]
+        ])
+
+        await callback_query.message.edit_text(response, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке запроса списка акций для пользователя {user_id}: {str(e)}")
+        await callback_query.message.edit_text(
+            f"❌ Ошибка при получении списка акций: {html.escape(str(e))}",
+            parse_mode="HTML",
+            reply_markup=get_stocks_menu()
+        )
+    finally:
+        await session.close()
+        logger.info(f"Сессия закрыта для пользователя {user_id}")
+    await callback_query.answer()
 
 @router.callback_query(lambda c: c.data == "subscribe")
 async def prompt_subscribe(callback_query: CallbackQuery):
