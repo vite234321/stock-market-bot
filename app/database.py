@@ -1,25 +1,18 @@
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy.sql import text
-import os
 import logging
 import asyncio
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, DatabaseError
+from app.models import Base, Stock, FigiStatus
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
 logger = logging.getLogger(__name__)
 
-# Получаем DATABASE_URL из переменных окружения
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    logger.error("DATABASE_URL не установлен в переменных окружения")
-    raise ValueError("DATABASE_URL не установлен в переменных окружения")
+# URL базы данных из переменной окружения
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@localhost/dbname")
 
-# Заменяем префикс для совместимости с asyncpg
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-logger.info(f"Используемый DATABASE_URL: {DATABASE_URL[:50]}... (обрезан для логов)")
-
-# Создаём асинхронный движок без специфичных настроек для pgbouncer
+# Создание асинхронного движка с отключением кэша подготовленных запросов для совместимости с pgbouncer
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
@@ -29,11 +22,9 @@ engine = create_async_engine(
     pool_pre_ping=True,
     connect_args={"statement_cache_size": 0},
 )
-async_session = async_sessionmaker(
-    engine,
-    expire_on_commit=False,
-    class_=AsyncSession
-)
+
+# Создание фабрики сессий
+async_session = async_sessionmaker(engine, expire_on_commit=False)
 
 async def init_db():
     logger.info("Инициализация базы данных...")
@@ -62,7 +53,7 @@ async def init_db():
                         test_stocks = [
                             Stock(ticker="SBER.ME", name="Сбербанк", last_price=0.0, figi_status=FigiStatus.PENDING.value),
                             Stock(ticker="LKOH.ME", name="Лукойл", last_price=0.0, figi_status=FigiStatus.PENDING.value),
-                            Stock(ticker="GAZP.ME", name="Газпром", last_price=0.0, figi_status=FigiStatus.PENDING.value),
+                            Stock(ticker="GAZP.ME", name="Газпром", last_price=0.0, figiStatus=FigiStatus.PENDING.value),
                             Stock(ticker="PRD.ME", name="Парк Дракино", last_price=0.0, figi_status=FigiStatus.PENDING.value),
                         ]
                         session.add_all(test_stocks)
@@ -91,8 +82,3 @@ async def init_db():
                 raise
             await asyncio.sleep(5)
     logger.info("База данных успешно инициализирована.")
-
-async def dispose_engine():
-    logger.info("Закрытие соединения с базой данных...")
-    await engine.dispose()
-    logger.info("Соединение с базой данных закрыто")
