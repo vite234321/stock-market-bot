@@ -53,7 +53,7 @@ async def init_db():
                         test_stocks = [
                             Stock(ticker="SBER.ME", name="Сбербанк", last_price=0.0, figi_status=FigiStatus.PENDING.value),
                             Stock(ticker="LKOH.ME", name="Лукойл", last_price=0.0, figi_status=FigiStatus.PENDING.value),
-                            Stock(ticker="GAZP.ME", name="Газпром", last_price=0.0, figiStatus=FigiStatus.PENDING.value),
+                            Stock(ticker="GAZP.ME", name="Газпром", last_price=0.0, figi_status=FigiStatus.PENDING.value),
                             Stock(ticker="PRD.ME", name="Парк Дракино", last_price=0.0, figi_status=FigiStatus.PENDING.value),
                         ]
                         session.add_all(test_stocks)
@@ -82,3 +82,12 @@ async def init_db():
                 raise
             await asyncio.sleep(5)
     logger.info("База данных успешно инициализирована.")
+
+async def dispose_engine():
+    """Закрытие асинхронного движка при завершении работы приложения."""
+    logger.info("Остановка движка базы данных...")
+    try:
+        await engine.dispose()
+        logger.info("Движок базы данных успешно остановлен.")
+    except Exception as e:
+        logger.error(f"Ошибка при остановке движка базы данных: {str(e)}")
